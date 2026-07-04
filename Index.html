@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Математический Тренажер</title>
+  <style>
+    :root { --primary: #4A90E2; --success: #2ECC71; --danger: #E74C3C; --dark: #2C3E50; --light: #F8F9FA; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; }
+    body { background-color: #E9ECEF; color: var(--dark); display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
+    .card { background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 500px; padding: 25px; }
+    h2 { margin-bottom: 20px; text-align: center; }
+    .header-stats { display: flex; justify-content: space-between; background: var(--light); padding: 10px; border-radius: 8px; margin-bottom: 10px; font-size: 14px; font-weight: bold; }
+    .hearts-row { text-align: center; font-size: 24px; margin-bottom: 15px; }
+    .task-image-container { text-align: center; margin-bottom: 20px; background: #FFF; border: 1px solid #E2E8F0; border-radius: 8px; padding: 10px; min-height: 150px; display: flex; align-items: center; justify-content: center; }
+    .task-image { max-width: 100%; max-height: 250px; }
+    .hint-block { background: #FEF9E7; border-left: 4px solid #F1C40F; padding: 10px; margin-bottom: 15px; border-radius: 4px; font-size: 14px; display: none; }
+    .feedback { text-align: center; font-weight: bold; font-size: 18px; margin: 15px 0; min-height: 27px; }
+    .feedback.correct { color: var(--success); }
+    .feedback.wrong { color: var(--danger); }
+    input[type="text"], input[type="password"] { width: 100%; padding: 12px; border: 2px solid #CBD5E1; border-radius: 8px; font-size: 16px; margin-bottom: 10px; outline: none; }
+    button { width: 100%; padding: 12px; border: none; border-radius: 8px; background: var(--primary); color: white; font-size: 16px; font-weight: bold; cursor: pointer; }
+    .btn-secondary { background: #95A5A6; margin-top: 5px; }
+    #loader { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.8); justify-content: center; align-items: center; z-index: 9999; }
+  </style>
+</head>
+<body>
+  <div id="loader">Загрузка...</div>
+
+  <div id="screen-login" class="card">
+    <h2>Вход</h2>
+    <input type="text" id="login-input" placeholder="ID">
+    <input type="password" id="password-input" placeholder="Пароль">
+    <button onclick="handleLogin()">Войти</button>
+  </div>
+
+  <div id="screen-trainer" class="card" style="display:none;">
+    <div class="quiz-stats">
+      <p>Задача №: <span id="task-number">1</span></p>
+      <p>Верно в этой сессии: <span id="correct-in-session">0</span></p>
+      <p>Всего решено на ступени: <span id="total-in-session">0</span> из 7</p>
+      <p>Ошибок: <span id="error-count">0</span> из 3</p>
+    </div>
+    <div class="header-stats">
+      <span id="stat-name"></span>
+      <span id="stat-level"></span>
+      <span id="stat-progress"></span>
+    </div>
+    <div class="hearts-row" id="stat-hearts">❤️❤️❤️</div>
+    <div class="task-image-container">
+      <div id="image-placeholder" style="color: #94A3B8;">[ Загрузка... ]</div>
+      <img id="task-img" class="task-image" style="display:none;">
+    </div>
+    <div id="hint-box" class="hint-block"></div>
+    <button id="hint-btn" class="btn-secondary" onclick="document.getElementById('hint-box').style.display='block'; this.style.display='none'">Подсказка</button>
+    <input type="text" id="answer-input" placeholder="Ваш ответ" onkeydown="if(event.key==='Enter' && !this.disabled) handleSendAnswer()" style="margin-top:15px;">
+    <button id="submit-btn" onclick="handleSendAnswer()">Ответить</button>
+    <button id="next-btn" style="display:none; background: var(--success);" onclick="handleNextStep()">Дальше ➔</button>
+    <div id="game-feedback" class="feedback"></div>
+  </div>
+
+  <div id="screen-result" class="card" style="display:none;">
+    <h2 id="result-title"></h2>
+    <p id="result-text" style="text-align:center; margin-bottom:20px;"></p>
+    <button onclick="switchScreen('screen-trainer'); loadNextTask();">Продолжить</button>
+  </div>
+
+  <script>
+    let currentUser = null, currentTask = null, lastResponse = null;
+
+    function showLoader(v) { document.getElementById('loader').style.display = v ? 'flex' : 'none'; }
+    function switchScreen(s) { document.querySelectorAll('.card').forEach(c => c.style.display='none'); document.getElementById(s).style.display='block'; }
+
+    function renderHearts(e) {
+      let h = '';
+      for(let i=0; i<3; i++) h += (i < (3-e)) ? '❤️' : '🤍';
+      document.getElementById('stat-hearts').innerText = h;
+    }
+
+    function handleScriptFailure(err) {
+      showLoader(false);
+      alert('Ошибка связи с сервером: ' + err.message);
+    }
+
+    function updateQuizStats(stats) {
+      if (!stats) return;
+      if (document.getElementById('task-number')) {
+        document.getElementById('task-number').innerText = stats.taskNumber;
+      }
+      if (document.getElementById('error-count')) {
+        document.getElementById('error-count').innerText = stats.errors;
+      }
+      if (document.getElementById('correct-in-session') && stats.correctInSession !== undefined) {
+        document.getElementById('correct-in-session').innerText = stats.correctInSession;
+      }
+      if (document.getElementById('total-in-session') && stats.totalInSession !== undefined) {
+        document.getElementById('total-in-session').innerText = stats.totalInSession;
+      }
+      if (document.getElementById('student-level') && stats.studentLevel !== undefined) {
+        document.getElementById('student-level').innerText = stats.studentLevel;
+      }
+    }
+
+    function handleLogin() {
+      showLoader(true);
+      google.script.run
+        .withSuccessHandler(r => {
+          showLoader(false);
+          if(r.success) { currentUser = r.user; document.getElementById('stat-name').innerText = r.user.name; switchScreen('screen-trainer'); loadNextTask(); }
+          else alert(r.message);
+        })
+        .withFailureHandler(handleScriptFailure)
+        .loginUser(document.getElementById('login-input').value, document.getElementById('password-input').value);
+    }
+
+    function loadNextTask() {
+      showLoader(true);
+      document.getElementById('game-feedback').innerText = '';
+      document.getElementById('answer-input').value = '';
+      document.getElementById('answer-input').disabled = false;
+      document.getElementById('submit-btn').style.display = 'block';
+      document.getElementById('next-btn').style.display = 'none';
+      document.getElementById('hint-box').style.display = 'none';
+      document.getElementById('hint-btn').style.display = 'block';
+
+      google.script.run
+        .withSuccessHandler(r => {
+          showLoader(false);
+          if(!r.success) return alert(r.message);
+          if(r.allCompleted) return switchScreen('screen-result'), document.getElementById('result-title').innerText="Победа!", document.getElementById('result-text').innerText="Все уровни пройдены!";
+
+          currentTask = r.task;
+          document.getElementById('stat-level').innerText = "Ступень: " + (r.currentRunStats.studentLevel + 1);
+          document.getElementById('stat-progress').innerText = "Задача " + r.currentRunStats.taskNumber + "/7";
+          renderHearts(r.currentRunStats.errors);
+          updateQuizStats({
+            taskNumber: r.currentRunStats.taskNumber,
+            errors: r.currentRunStats.errors,
+            totalInSession: Math.max(0, r.currentRunStats.taskNumber - 1)
+          });
+
+          const img = document.getElementById('task-img'), ph = document.getElementById('image-placeholder');
+          if(r.task.imageUrl && r.task.imageUrl.includes('http')) {
+            let url = r.task.imageUrl;
+            let m = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
+            img.src = m ? 'https://lh3.googleusercontent.com/d/' + m[1] : url;
+            img.style.display = 'inline-block'; ph.style.display = 'none';
+          } else { img.style.display = 'none'; ph.innerText = "Задача #" + r.task.id; ph.style.display = 'block'; }
+          document.getElementById('hint-box').innerText = r.task.hint || "Нет подсказки";
+        })
+        .withFailureHandler(handleScriptFailure)
+        .getTaskForUser(currentUser.id);
+    }
+
+    function handleSendAnswer() {
+      const a = document.getElementById('answer-input').value;
+      if(!a) return;
+      showLoader(true);
+      google.script.run
+        .withSuccessHandler(r => {
+          showLoader(false);
+          lastResponse = r;
+          document.getElementById('answer-input').disabled = true;
+          document.getElementById('submit-btn').style.display = 'none';
+          document.getElementById('next-btn').style.display = 'block';
+          renderHearts(r.currentRunStats.errors);
+          updateQuizStats(r.stats || r.currentRunStats);
+          const f = document.getElementById('game-feedback');
+          f.innerText = r.isCorrect ? "Верно!" : "Ошибка! Ответ: " + r.correctAnswer;
+          f.className = r.isCorrect ? "feedback correct" : "feedback wrong";
+        })
+        .withFailureHandler(handleScriptFailure)
+        .submitAnswer(currentUser.id, currentTask.id, a);
+    }
+
+    function handleNextStep() {
+      const r = lastResponse;
+      if(r.runStatus === "continue") loadNextTask();
+      else if(r.runStatus === "win") switchScreen('screen-result'), document.getElementById('result-title').innerText="Ура!", document.getElementById('result-text').innerText="Ступень пройдена!";
+      else if(r.runStatus === "fail") switchScreen('screen-result'), document.getElementById('result-title').innerText="Упс!", document.getElementById('result-text').innerText="3 ошибки. Попробуем снова?";
+      else if(r.runStatus === "all_clear") switchScreen('screen-result'), document.getElementById('result-title').innerText="Финиш!", document.getElementById('result-text').innerText="Тренажер полностью пройден!";
+    }
+
+    /**
+     * Обработчик успешного ответа от сервера после отправки ответа на задачу
+     * @param {Object} response - Ответ от бэкенд-функции submitAnswer
+     */
+    function handleAnswerResponse(response) {
+      // Включаем обратно кнопку отправки ответа и поле ввода после проверки
+      const submitBtn = document.getElementById('submit-btn');
+      const answerInput = document.getElementById('answer-input');
+      if (submitBtn) submitBtn.disabled = false;
+      if (answerInput) answerInput.disabled = false;
+
+      // Если бэкенд вернул ошибку выполнения
+      if (!response.success) {
+        alert("Произошла ошибка: " + response.message);
+        return;
+      }
+
+      // 1. Подсвечиваем пользователю результат проверки
+      if (response.isCorrect) {
+        alert("Правильно! 🎉");
+        if (answerInput) answerInput.value = ""; // Очищаем поле ввода
+      } else {
+        alert("Неверно. Правильный ответ был: " + response.correctAnswer);
+        if (answerInput) answerInput.value = ""; // Очищаем поле ввода
+      }
+
+      // 2. Обновляем все счетчики на экране из объекта stats
+      const stats = response.stats;
+      if (stats) {
+        if (document.getElementById('task-number')) {
+          document.getElementById('task-number').innerText = stats.taskNumber;
+        }
+        if (document.getElementById('error-count')) {
+          document.getElementById('error-count').innerText = stats.errors;
+        }
+        if (document.getElementById('correct-in-session')) {
+          document.getElementById('correct-in-session').innerText = stats.correctInSession;
+        }
+        if (document.getElementById('total-in-session')) {
+          document.getElementById('total-in-session').innerText = stats.totalInSession;
+        }
+        if (document.getElementById('student-level')) {
+          document.getElementById('student-level').innerText = stats.studentLevel;
+        }
+      }
+
+      // 3. Распределяем логику в зависимости от статуса сессии (runStatus)
+      switch (response.runStatus) {
+
+        case "continue":
+          // Сессия продолжается, запрашиваем следующую задачу
+          // Замените 'loadNextTask' на имя вашей функции, которая запрашивает задачу с сервера
+          if (typeof loadNextTask === "function") {
+            loadNextTask();
+          }
+          break;
+
+        case "win":
+          // Ученик успешно закрыл сессию (7 верных/допустимых) и перешел на новый уровень
+          alert("Отличная работа! Ступень пройдена. Вы переходите на уровень " + (stats.studentLevel + 1) + "!");
+          if (typeof loadNextTask === "function") {
+            loadNextTask();
+          }
+          break;
+
+        case "fail":
+          // Ученик совершил 3 ошибки, счетчики сбросились в ноль
+          alert("Допущено 3 ошибки. Текущая сессия сброшена. Попробуем еще раз сначала!");
+          if (typeof loadNextTask === "function") {
+            loadNextTask();
+          }
+          break;
+
+        case "all_clear":
+          // Ученик полностью завершил все доступные уровни тренажера (level >= 5)
+          alert("Поздравляем! Вы полностью прошли все ступени тренажера! Программа завершена.");
+          // Блокируем интерфейс, так как решать больше нечего
+          if (submitBtn) submitBtn.disabled = true;
+          if (answerInput) answerInput.disabled = true;
+          break;
+
+        default:
+          console.warn("Неизвестный статус сессии:", response.runStatus);
+      }
+    }
+  </script>
+</body>
+</html>
