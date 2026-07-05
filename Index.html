@@ -12,6 +12,9 @@
     .card { background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 500px; padding: 25px; }
     h2 { margin-bottom: 20px; text-align: center; }
     .header-stats { display: flex; justify-content: space-between; background: var(--light); padding: 10px; border-radius: 8px; margin-bottom: 10px; font-size: 14px; font-weight: bold; }
+    .progress-row { text-align: center; font-size: 28px; margin-bottom: 8px; letter-spacing: 4px; }
+    .apple { opacity: 0.25; filter: grayscale(1); }
+    .apple.lit { opacity: 1; filter: none; }
     .hearts-row { text-align: center; font-size: 24px; margin-bottom: 15px; }
     .task-image-container { text-align: center; margin-bottom: 20px; background: #FFF; border: 1px solid #E2E8F0; border-radius: 8px; padding: 10px; min-height: 150px; display: flex; align-items: center; justify-content: center; }
     .task-image { max-width: 100%; max-height: 250px; }
@@ -36,17 +39,11 @@
   </div>
 
   <div id="screen-trainer" class="card" style="display:none;">
-    <div class="quiz-stats">
-      <p>Задача №: <span id="task-number">1</span></p>
-      <p>Верно в этой сессии: <span id="correct-in-session">0</span></p>
-      <p>Всего решено на ступени: <span id="total-in-session">0</span> из 7</p>
-      <p>Ошибок: <span id="error-count">0</span> из 3</p>
-    </div>
     <div class="header-stats">
       <span id="stat-name"></span>
       <span id="stat-level"></span>
-      <span id="stat-progress"></span>
     </div>
+    <div class="progress-row" id="stat-apples" aria-label="Прогресс до ступени"></div>
     <div class="hearts-row" id="stat-hearts">❤️❤️❤️</div>
     <div class="task-image-container">
       <div id="image-placeholder" style="color: #94A3B8;">[ Загрузка... ]</div>
@@ -67,7 +64,7 @@
   </div>
 
   <script>
-    let currentUser = null, currentTask = null, lastResponse = null;
+    let currentUser = null, currentTask = null, lastResponse = null, isFirstTaskAfterLogin = false;
 
     function showLoader(v) { document.getElementById('loader').style.display = v ? 'flex' : 'none'; }
     function switchScreen(s) { document.querySelectorAll('.card').forEach(c => c.style.display='none'); document.getElementById(s).style.display='block'; }
@@ -78,28 +75,30 @@
       document.getElementById('stat-hearts').innerText = h;
     }
 
+    function renderApples(correctCount) {
+      const box = document.getElementById('stat-apples');
+      box.innerHTML = '';
+      for (let i = 0; i < 7; i++) {
+        const span = document.createElement('span');
+        span.className = 'apple' + (i < correctCount ? ' lit' : '');
+        span.textContent = '🍎';
+        box.appendChild(span);
+      }
+    }
+
+    function renderSessionStats(stats) {
+      if (!stats) return;
+      renderApples(stats.correctInSession || 0);
+      renderHearts(stats.errors || 0);
+    }
+
     function handleScriptFailure(err) {
       showLoader(false);
       alert('Ошибка связи с сервером: ' + err.message);
     }
 
     function updateQuizStats(stats) {
-      if (!stats) return;
-      if (document.getElementById('task-number')) {
-        document.getElementById('task-number').innerText = stats.taskNumber;
-      }
-      if (document.getElementById('error-count')) {
-        document.getElementById('error-count').innerText = stats.errors;
-      }
-      if (document.getElementById('correct-in-session') && stats.correctInSession !== undefined) {
-        document.getElementById('correct-in-session').innerText = stats.correctInSession;
-      }
-      if (document.getElementById('total-in-session') && stats.totalInSession !== undefined) {
-        document.getElementById('total-in-session').innerText = stats.totalInSession;
-      }
-      if (document.getElementById('student-level') && stats.studentLevel !== undefined) {
-        document.getElementById('student-level').innerText = stats.studentLevel;
-      }
+      renderSessionStats(stats);
     }
 
     function handleLogin() {
@@ -107,7 +106,13 @@
       google.script.run
         .withSuccessHandler(r => {
           showLoader(false);
-          if(r.success) { currentUser = r.user; document.getElementById('stat-name').innerText = r.user.name; switchScreen('screen-trainer'); loadNextTask(); }
+          if(r.success) {
+            currentUser = r.user;
+            isFirstTaskAfterLogin = true;
+            document.getElementById('stat-name').innerText = r.user.name;
+            switchScreen('screen-trainer');
+            loadNextTask();
+          }
           else alert(r.message);
         })
         .withFailureHandler(handleScriptFailure)
@@ -124,6 +129,9 @@
       document.getElementById('hint-box').style.display = 'none';
       document.getElementById('hint-btn').style.display = 'block';
 
+      const startNewSession = isFirstTaskAfterLogin;
+      isFirstTaskAfterLogin = false;
+
       google.script.run
         .withSuccessHandler(r => {
           showLoader(false);
@@ -132,13 +140,7 @@
 
           currentTask = r.task;
           document.getElementById('stat-level').innerText = "Ступень: " + (r.currentRunStats.studentLevel + 1);
-          document.getElementById('stat-progress').innerText = "Задача " + r.currentRunStats.taskNumber + "/7";
-          renderHearts(r.currentRunStats.errors);
-          updateQuizStats({
-            taskNumber: r.currentRunStats.taskNumber,
-            errors: r.currentRunStats.errors,
-            totalInSession: Math.max(0, r.currentRunStats.taskNumber - 1)
-          });
+          renderSessionStats(r.currentRunStats);
 
           const img = document.getElementById('task-img'), ph = document.getElementById('image-placeholder');
           if(r.task.imageUrl && r.task.imageUrl.includes('http')) {
@@ -150,7 +152,7 @@
           document.getElementById('hint-box').innerText = r.task.hint || "Нет подсказки";
         })
         .withFailureHandler(handleScriptFailure)
-        .getTaskForUser(currentUser.id);
+        .getTaskForUser(currentUser.id, startNewSession);
     }
 
     function handleSendAnswer() {
@@ -164,8 +166,7 @@
           document.getElementById('answer-input').disabled = true;
           document.getElementById('submit-btn').style.display = 'none';
           document.getElementById('next-btn').style.display = 'block';
-          renderHearts(r.currentRunStats.errors);
-          updateQuizStats(r.stats || r.currentRunStats);
+          renderSessionStats(r.currentRunStats);
           const f = document.getElementById('game-feedback');
           f.innerText = r.isCorrect ? "Верно!" : "Ошибка! Ответ: " + r.correctAnswer;
           f.className = r.isCorrect ? "feedback correct" : "feedback wrong";

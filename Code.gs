@@ -34,8 +34,10 @@ function loginUser(login, pass) {
 
 /**
  * Получение текущей задачи для ученика
+ * @param {string} userId
+ * @param {boolean} startNewSession — true при первом запросе после входа (новая сессия)
  */
-function getTaskForUser(userId) {
+function getTaskForUser(userId, startNewSession) {
   try {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Пользователи");
     const userRow = _getUserRowData(userId);
@@ -45,6 +47,12 @@ function getTaskForUser(userId) {
     let level = parseInt(userRow.data[7]); // Колонка H (8) - Текущая ступень
     if (isNaN(level)) level = 0;
 
+    if (startNewSession) {
+      _resetSessionCounters(sheet, row);
+      userRow.data[8] = 0;
+      userRow.data[9] = 0;
+    }
+
     let верно = parseInt(userRow.data[8]) || 0;   // Колонка I (9)
     let ошибки = parseInt(userRow.data[9]) || 0; // Колонка J (10)
 
@@ -53,53 +61,28 @@ function getTaskForUser(userId) {
       return { success: true, allCompleted: true };
     }
 
-    // Читаем живой лог пар начиная с 11-й колонки (K)
-    const lastColumn = sheet.getLastColumn();
-    let logValues = [];
-    if (lastColumn >= 11) {
-      logValues = sheet.getRange(row, 11, 1, lastColumn - 10).getValues()[0];
-    }
-
-    let completedPairsCount = 0;
-    let activeTaskId = null;
-    const usedTaskIds = [];
-
-    // Парсим лог парами: [ID задачи, Вердикт]
-    for (let i = 0; i < logValues.length; i += 2) {
-      let tId = logValues[i] ? logValues[i].toString().trim() : "";
-      let verdict = logValues[i+1] ? logValues[i+1].toString().trim() : "";
-
-      if (tId === "") break; // Лог пуст/закончился
-
-      usedTaskIds.push(tId);
-
-      if (verdict !== "") {
-        completedPairsCount++;
-      } else {
-        // Есть ID задачи, но нет вердикта — это текущая активная задача сессии
-        activeTaskId = tId;
-        break;
-      }
-    }
-
     // Если школьник зашел с накопленным критическим числом ошибок (страховка)
     if (ошибки >= 3) {
-      _clearSessionProgress(sheet, row);
-      return getTaskForUser(userId);
+      _resetSessionCounters(sheet, row);
+      верно = 0;
+      ошибки = 0;
     }
 
-    // Текущий порядковый номер задачи в этой сессии
+    const session = _parseCurrentSessionLog(sheet, row);
+    let completedPairsCount = session.completedPairsCount;
+    let activeTaskId = session.activeTaskId;
+    const usedTaskIds = session.usedTaskIds;
+
+    // Текущий порядковый номер попытки в этой сессии
     const taskNumber = completedPairsCount + 1;
 
     let currentTaskId = activeTaskId;
 
-    // Если активной задачи нет в логе (первый запуск или прошлая задача решена), генерируем новую
+    // Если активной задачи нет в логе, генерируем новую
     if (!currentTaskId) {
-      // Номер искомой ступени в базе = уровень + 1 (при уровне 0 решаем задачи 1-й ступени)
       const targetLevel = level + 1;
       const allTasks = _getTasksByLevel(targetLevel);
 
-      // Исключаем задачи, которые уже мелькали в этой сессии
       const availableTasks = allTasks.filter(function(t) {
         return usedTaskIds.indexOf(t.id.toString().trim()) === -1;
       });
@@ -108,16 +91,13 @@ function getTaskForUser(userId) {
         return { success: false, message: "В базе данных нет доступных задач для Ступени " + targetLevel };
       }
 
-      // Выбираем случайную задачу из оставшихся
       const randomTask = availableTasks[Math.floor(Math.random() * availableTasks.length)];
       currentTaskId = randomTask.id;
 
-      // Фиксируем ID новой задачи в лог (ячейка под ID текущей пары)
-      const nextCellCol = 11 + (completedPairsCount * 2);
+      const nextCellCol = session.sessionStartCol + (completedPairsCount * 2);
       sheet.getRange(row, nextCellCol).setValue(currentTaskId);
     }
 
-    // Ищем данные карточки задачи в базе
     const targetLevel = level + 1;
     const allTasks = _getTasksByLevel(targetLevel);
     const taskObj = allTasks.find(function(t) { return t.id.toString() === currentTaskId.toString(); });
@@ -134,11 +114,7 @@ function getTaskForUser(userId) {
         imageUrl: taskObj.imageUrl,
         hint: taskObj.hint
       },
-      currentRunStats: {
-        studentLevel: level,
-        taskNumber: taskNumber,
-        errors: ошибки
-      }
+      currentRunStats: _buildRunStats(level, taskNumber, верно, ошибки)
     };
   } catch (e) {
     return { success: false, message: "Ошибка получения задачи: " + e.message };
@@ -161,7 +137,6 @@ function submitAnswer(userId, taskId, answer) {
     let верно = parseInt(userRow.data[8]) || 0;
     let ошибки = parseInt(userRow.data[9]) || 0;
 
-    // Ищем задачу для сверки ответа
     const targetLevel = level + 1;
     const allTasks = _getTasksByLevel(targetLevel);
     const taskObj = allTasks.find(function(t) { return t.id.toString() === taskId.toString(); });
@@ -169,8 +144,6 @@ function submitAnswer(userId, taskId, answer) {
 
     const correctAnswer = taskObj.answer.toString().trim();
     const userAnswer = answer.toString().trim();
-
-    // Сверка без учета регистра
     const isCorrect = userAnswer.toLowerCase() === correctAnswer.toLowerCase();
 
     if (isCorrect) {
@@ -179,56 +152,42 @@ function submitAnswer(userId, taskId, answer) {
       ошибки += 1;
     }
 
-    // Ищем в логе ячейку вердикта для текущей задачи (где ID совпал, а вердикт пуст)
-    const lastColumn = sheet.getLastColumn();
-    let logValues = [];
-    if (lastColumn >= 11) {
-      logValues = sheet.getRange(row, 11, 1, lastColumn - 10).getValues()[0];
-    }
-
+    const session = _parseCurrentSessionLog(sheet, row);
     let verdictCol = -1;
-    let completedPairsCount = 0;
 
-    for (let i = 0; i < logValues.length; i += 2) {
-      let tId = logValues[i] ? logValues[i].toString().trim() : "";
-      let verdict = logValues[i+1] ? logValues[i+1].toString().trim() : "";
+    for (let i = 0; i < session.sessionSlice.length; i += 2) {
+      const tId = session.sessionSlice[i] ? session.sessionSlice[i].toString().trim() : "";
+      const verdict = session.sessionSlice[i + 1] ? session.sessionSlice[i + 1].toString().trim() : "";
 
       if (tId === taskId.toString().trim() && verdict === "") {
-        verdictCol = 11 + i + 1;
+        verdictCol = session.sessionStartCol + i + 1;
         break;
       }
-      if (verdict !== "") {
-        completedPairsCount++;
-      }
     }
 
-    // Если по какой-то причине пустая ячейка под вердикт не найдена циклом
     if (verdictCol === -1) {
-      let filledCells = 0;
-      for (let i = 0; i < logValues.length; i++) {
-        if (logValues[i] !== "") filledCells++;
-        else break;
-      }
-      verdictCol = 11 + filledCells + (filledCells % 2 === 0 ? 1 : 0);
+      const nextCol = session.sessionStartCol + (session.completedPairsCount * 2) + 1;
+      verdictCol = nextCol;
     }
 
-    // Записываем вердикт в таблицу
     sheet.getRange(row, verdictCol).setValue(isCorrect ? "Да" : "Нет");
-    completedPairsCount++;
 
-    let runStatus = "continue"; // Статусы: continue, win, fail, all_clear
+    const completedPairsCount = session.completedPairsCount + 1;
+    let runStatus = "continue";
+    let responseStats = null;
 
     if (ошибки >= 3) {
       runStatus = "fail";
+      responseStats = _buildRunStats(level, completedPairsCount, верно, ошибки);
+      _resetSessionCounters(sheet, row);
       верно = 0;
       ошибки = 0;
-      _clearSessionProgress(sheet, row);
-    } else if (completedPairsCount >= 7) {
-      // Успешно решили 7 задач сессии с допустимым количеством ошибок
+    } else if (верно >= 7) {
+      responseStats = _buildRunStats(level, completedPairsCount, 7, ошибки);
       level += 1;
+      _resetSessionCounters(sheet, row);
       верно = 0;
       ошибки = 0;
-      _clearSessionProgress(sheet, row);
 
       if (level >= 5) {
         runStatus = "all_clear";
@@ -237,16 +196,12 @@ function submitAnswer(userId, taskId, answer) {
       }
     }
 
-    // Сохраняем обновленные статусы обратно в таблицу (колонки H, I, J)
     sheet.getRange(row, 8).setValue(level);
     sheet.getRange(row, 9).setValue(верно);
     sheet.getRange(row, 10).setValue(ошибки);
 
-    const updatedStats = {
-      studentLevel: level,
-      taskNumber: (runStatus === "continue") ? (completedPairsCount + 1) : 1,
-      errors: ошибки
-    };
+    const taskNumber = (runStatus === "continue") ? (completedPairsCount + 1) : 1;
+    const updatedStats = responseStats || _buildRunStats(level, taskNumber, верно, ошибки);
 
     return {
       success: true,
@@ -263,17 +218,95 @@ function submitAnswer(userId, taskId, answer) {
 }
 
 /**
- * Вспомогательная функция: Полная очистка прогресса текущей сессии (колонки I, J и лог с K)
+ * Сброс счётчиков сессии (I, J) без стирания лога; маркер ## отделяет сессии
  */
-function _clearSessionProgress(sheet, row) {
-  sheet.getRange(row, 9).setValue(0);  // Обнуляем Количество верных (I)
-  sheet.getRange(row, 10).setValue(0); // Обнуляем Количество ошибок (J)
+function _resetSessionCounters(sheet, row) {
+  sheet.getRange(row, 9).setValue(0);
+  sheet.getRange(row, 10).setValue(0);
 
-  const currentLastCol = sheet.getLastColumn();
-  if (currentLastCol >= 11) {
-    // Чистим лог пар начиная с колонки K до самого конца заполненных данных
-    sheet.getRange(row, 11, 1, currentLastCol - 10).clearContent();
+  const lastColumn = sheet.getLastColumn();
+  let nextCol = 11;
+
+  if (lastColumn >= 11) {
+    const logValues = sheet.getRange(row, 11, 1, lastColumn - 10).getValues()[0];
+    let lastFilledCol = 10;
+    for (let i = 0; i < logValues.length; i++) {
+      if (logValues[i] !== "" && logValues[i] !== null) {
+        lastFilledCol = 11 + i;
+      }
+    }
+    nextCol = lastFilledCol + 1;
   }
+
+  sheet.getRange(row, nextCol).setValue("##");
+}
+
+/**
+ * Разбор лога текущей сессии (после последнего маркера ##)
+ */
+function _parseCurrentSessionLog(sheet, row) {
+  const lastColumn = sheet.getLastColumn();
+  if (lastColumn < 11) {
+    return {
+      sessionStartCol: 11,
+      sessionSlice: [],
+      completedPairsCount: 0,
+      activeTaskId: null,
+      usedTaskIds: []
+    };
+  }
+
+  const fullLog = sheet.getRange(row, 11, 1, lastColumn - 10).getValues()[0];
+  let sessionStartIndex = 0;
+
+  for (let i = 0; i < fullLog.length; i++) {
+    if (fullLog[i].toString().trim() === "##") {
+      sessionStartIndex = i + 1;
+    }
+  }
+
+  const sessionStartCol = 11 + sessionStartIndex;
+  const sessionSlice = fullLog.slice(sessionStartIndex);
+  const usedTaskIds = [];
+  let completedPairsCount = 0;
+  let activeTaskId = null;
+
+  for (let i = 0; i < sessionSlice.length; i += 2) {
+    const tId = sessionSlice[i] ? sessionSlice[i].toString().trim() : "";
+    const verdict = sessionSlice[i + 1] ? sessionSlice[i + 1].toString().trim() : "";
+
+    if (tId === "" || tId === "##") break;
+
+    usedTaskIds.push(tId);
+
+    if (verdict !== "") {
+      completedPairsCount++;
+    } else {
+      activeTaskId = tId;
+      break;
+    }
+  }
+
+  return {
+    sessionStartCol: sessionStartCol,
+    sessionSlice: sessionSlice,
+    completedPairsCount: completedPairsCount,
+    activeTaskId: activeTaskId,
+    usedTaskIds: usedTaskIds
+  };
+}
+
+/**
+ * Объект статистики текущей сессии для фронтенда
+ */
+function _buildRunStats(level, taskNumber, correctCount, errorCount) {
+  return {
+    studentLevel: level,
+    taskNumber: taskNumber,
+    errors: errorCount,
+    correctInSession: correctCount,
+    remainingCorrect: Math.max(0, 7 - correctCount)
+  };
 }
 
 /**
