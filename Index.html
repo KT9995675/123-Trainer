@@ -24,6 +24,7 @@
     .feedback.wrong { color: var(--danger); }
     input[type="text"], input[type="password"] { width: 100%; padding: 12px; border: 2px solid #CBD5E1; border-radius: 8px; font-size: 16px; margin-bottom: 10px; outline: none; }
     button { width: 100%; padding: 12px; border: none; border-radius: 8px; background: var(--primary); color: white; font-size: 16px; font-weight: bold; cursor: pointer; }
+    button:disabled { opacity: 0.65; cursor: wait; }
     .btn-secondary { background: #95A5A6; margin-top: 5px; }
     #loader { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.8); justify-content: center; align-items: center; z-index: 9999; }
   </style>
@@ -60,11 +61,72 @@
   <div id="screen-result" class="card" style="display:none;">
     <h2 id="result-title"></h2>
     <p id="result-text" style="text-align:center; margin-bottom:20px;"></p>
-    <button onclick="switchScreen('screen-trainer'); loadNextTask();">Продолжить</button>
+    <button onclick="switchScreen('screen-trainer'); needsNewSession=true; loadNextTask();">Продолжить</button>
   </div>
 
   <script>
-    let currentUser = null, currentTask = null, lastResponse = null, isFirstTaskAfterLogin = false;
+    let currentUser = null, currentTask = null, lastResponse = null;
+    let isFirstTaskAfterLogin = false, needsNewSession = false;
+    let sessionTasks = [], sessionIndex = 0, runStats = null, answerPending = false;
+    let sessionLog = [], queueIds = [], pendingFinalize = null;
+    let sessionTimeoutId = null, sessionExpired = false;
+    const SESSION_TIMEOUT_MS = 3600000;
+    const MAX_SAVE_ATTEMPTS = 3;
+
+    function resetNextButton() {
+      const nextBtn = document.getElementById('next-btn');
+      nextBtn.innerText = 'Дальше ➔';
+      nextBtn.onclick = handleNextStep;
+    }
+
+    function clearSessionState() {
+      sessionTasks = [];
+      sessionLog = [];
+      queueIds = [];
+      runStats = null;
+      lastResponse = null;
+      pendingFinalize = null;
+      sessionIndex = 0;
+      currentTask = null;
+      sessionExpired = false;
+      if (sessionTimeoutId) {
+        clearTimeout(sessionTimeoutId);
+        sessionTimeoutId = null;
+      }
+    }
+
+    function startSessionTimer() {
+      if (sessionTimeoutId) clearTimeout(sessionTimeoutId);
+      sessionExpired = false;
+      sessionTimeoutId = setTimeout(function() {
+        sessionExpired = true;
+        clearSessionState();
+        alert('Сессия завершена по таймауту (1 час). Войдите снова.');
+        switchScreen('screen-login');
+      }, SESSION_TIMEOUT_MS);
+    }
+
+    function buildLocalRunStats(level, taskNumber, correctCount, errorCount) {
+      return {
+        studentLevel: level,
+        taskNumber: taskNumber,
+        errors: errorCount,
+        correctInSession: correctCount,
+        remainingCorrect: Math.max(0, 7 - correctCount)
+      };
+    }
+
+    function checkAnswerLocally(userAnswer, task) {
+      const correctAnswer = (task.answer || '').toString().trim();
+      const isCorrect = userAnswer.toLowerCase() === correctAnswer.toLowerCase();
+      return { isCorrect: isCorrect, correctAnswer: correctAnswer };
+    }
+
+    function showAnswerFeedback(isCorrect, correctAnswer) {
+      const f = document.getElementById('game-feedback');
+      f.innerText = isCorrect ? 'Верно!' : 'Ошибка! Ответ: ' + correctAnswer;
+      f.className = isCorrect ? 'feedback correct' : 'feedback wrong';
+    }
 
     function showLoader(v) { document.getElementById('loader').style.display = v ? 'flex' : 'none'; }
     function switchScreen(s) { document.querySelectorAll('.card').forEach(c => c.style.display='none'); document.getElementById(s).style.display='block'; }
@@ -92,6 +154,57 @@
       renderHearts(stats.errors || 0);
     }
 
+    function taskImageUrl(imageUrl) {
+      if (!imageUrl || !imageUrl.includes('http')) return null;
+      const m = imageUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || imageUrl.match(/id=([a-zA-Z0-9_-]+)/);
+      return m ? 'https://lh3.googleusercontent.com/d/' + m[1] : imageUrl;
+    }
+
+    function prefetchNextImage(idx) {
+      if (!sessionTasks[idx]) return;
+      const url = taskImageUrl(sessionTasks[idx].imageUrl);
+      if (!url) return;
+      const img = new Image();
+      img.src = url;
+    }
+
+    function resetTaskUi() {
+      document.getElementById('game-feedback').innerText = '';
+      document.getElementById('answer-input').value = '';
+      document.getElementById('answer-input').disabled = false;
+      const submitBtn = document.getElementById('submit-btn');
+      submitBtn.style.display = 'block';
+      submitBtn.disabled = false;
+      submitBtn.innerText = 'Ответить';
+      document.getElementById('next-btn').style.display = 'none';
+      document.getElementById('hint-box').style.display = 'none';
+      document.getElementById('hint-btn').style.display = 'block';
+      answerPending = false;
+      resetNextButton();
+    }
+
+    function showTaskFromSession(idx, stats) {
+      if (!sessionTasks[idx]) return alert('Следующая задача не найдена в сессии.');
+      resetTaskUi();
+      currentTask = sessionTasks[idx];
+      sessionIndex = idx;
+      if (stats) renderSessionStats(stats);
+
+      const img = document.getElementById('task-img'), ph = document.getElementById('image-placeholder');
+      const url = taskImageUrl(currentTask.imageUrl);
+      if (url) {
+        img.src = url;
+        img.style.display = 'inline-block';
+        ph.style.display = 'none';
+      } else {
+        img.style.display = 'none';
+        ph.innerText = 'Задача #' + currentTask.id;
+        ph.style.display = 'block';
+      }
+      document.getElementById('hint-box').innerText = currentTask.hint || 'Нет подсказки';
+      prefetchNextImage(idx + 1);
+    }
+
     function handleScriptFailure(err) {
       showLoader(false);
       alert('Ошибка связи с сервером: ' + err.message);
@@ -109,6 +222,7 @@
           if(r.success) {
             currentUser = r.user;
             isFirstTaskAfterLogin = true;
+            clearSessionState();
             document.getElementById('stat-name').innerText = r.user.name;
             switchScreen('screen-trainer');
             loadNextTask();
@@ -120,17 +234,12 @@
     }
 
     function loadNextTask() {
-      showLoader(true);
-      document.getElementById('game-feedback').innerText = '';
-      document.getElementById('answer-input').value = '';
-      document.getElementById('answer-input').disabled = false;
-      document.getElementById('submit-btn').style.display = 'block';
-      document.getElementById('next-btn').style.display = 'none';
-      document.getElementById('hint-box').style.display = 'none';
-      document.getElementById('hint-btn').style.display = 'block';
-
-      const startNewSession = isFirstTaskAfterLogin;
+      const startNewSession = isFirstTaskAfterLogin || needsNewSession;
       isFirstTaskAfterLogin = false;
+      needsNewSession = false;
+
+      showLoader(true);
+      resetTaskUi();
 
       google.script.run
         .withSuccessHandler(r => {
@@ -138,18 +247,13 @@
           if(!r.success) return alert(r.message);
           if(r.allCompleted) return switchScreen('screen-result'), document.getElementById('result-title').innerText="Победа!", document.getElementById('result-text').innerText="Все уровни пройдены!";
 
-          currentTask = r.task;
+          sessionTasks = r.sessionTasks || [];
+          queueIds = r.queueIds || sessionTasks.map(function(t) { return t.id.toString(); });
+          sessionLog = [];
+          runStats = r.currentRunStats;
+          startSessionTimer();
           document.getElementById('stat-level').innerText = "Ступень: " + (r.currentRunStats.studentLevel + 1);
-          renderSessionStats(r.currentRunStats);
-
-          const img = document.getElementById('task-img'), ph = document.getElementById('image-placeholder');
-          if(r.task.imageUrl && r.task.imageUrl.includes('http')) {
-            let url = r.task.imageUrl;
-            let m = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
-            img.src = m ? 'https://lh3.googleusercontent.com/d/' + m[1] : url;
-            img.style.display = 'inline-block'; ph.style.display = 'none';
-          } else { img.style.display = 'none'; ph.innerText = "Задача #" + r.task.id; ph.style.display = 'block'; }
-          document.getElementById('hint-box').innerText = r.task.hint || "Нет подсказки";
+          showTaskFromSession(r.sessionIndex || 0, r.currentRunStats);
         })
         .withFailureHandler(handleScriptFailure)
         .getTaskForUser(currentUser.id, startNewSession);
@@ -157,30 +261,135 @@
 
     function handleSendAnswer() {
       const a = document.getElementById('answer-input').value;
-      if(!a) return;
-      showLoader(true);
-      google.script.run
-        .withSuccessHandler(r => {
-          showLoader(false);
-          lastResponse = r;
-          document.getElementById('answer-input').disabled = true;
-          document.getElementById('submit-btn').style.display = 'none';
-          document.getElementById('next-btn').style.display = 'block';
-          renderSessionStats(r.currentRunStats);
-          const f = document.getElementById('game-feedback');
-          f.innerText = r.isCorrect ? "Верно!" : "Ошибка! Ответ: " + r.correctAnswer;
-          f.className = r.isCorrect ? "feedback correct" : "feedback wrong";
-        })
-        .withFailureHandler(handleScriptFailure)
-        .submitAnswer(currentUser.id, currentTask.id, a);
+      if (!a || answerPending || sessionExpired) return;
+
+      const check = checkAnswerLocally(a.trim(), currentTask);
+      answerPending = true;
+
+      document.getElementById('answer-input').disabled = true;
+      document.getElementById('submit-btn').disabled = true;
+
+      showAnswerFeedback(check.isCorrect, check.correctAnswer);
+
+      sessionLog.push({
+        taskId: currentTask.id.toString(),
+        isCorrect: check.isCorrect
+      });
+
+      const correctInSession = (runStats.correctInSession || 0) + (check.isCorrect ? 1 : 0);
+      const errors = (runStats.errors || 0) + (check.isCorrect ? 0 : 1);
+      const level = runStats.studentLevel;
+
+      let runStatus = 'continue';
+      if (errors >= 3) {
+        runStatus = 'fail';
+      } else if (correctInSession >= 7) {
+        runStatus = (level + 1 >= 5) ? 'all_clear' : 'win';
+      }
+
+      runStats = buildLocalRunStats(level, sessionLog.length, correctInSession, errors);
+      renderSessionStats(runStats);
+
+      lastResponse = {
+        runStatus: runStatus,
+        sessionIndex: sessionIndex + 1,
+        currentRunStats: runStats
+      };
+
+      document.getElementById('next-btn').style.display = 'block';
+      if (runStatus === 'continue') prefetchNextImage(sessionIndex + 1);
     }
 
     function handleNextStep() {
       const r = lastResponse;
-      if(r.runStatus === "continue") loadNextTask();
-      else if(r.runStatus === "win") switchScreen('screen-result'), document.getElementById('result-title').innerText="Ура!", document.getElementById('result-text').innerText="Ступень пройдена!";
-      else if(r.runStatus === "fail") switchScreen('screen-result'), document.getElementById('result-title').innerText="Упс!", document.getElementById('result-text').innerText="3 ошибки. Попробуем снова?";
-      else if(r.runStatus === "all_clear") switchScreen('screen-result'), document.getElementById('result-title').innerText="Финиш!", document.getElementById('result-text').innerText="Тренажер полностью пройден!";
+      if (!r || sessionExpired) return;
+
+      if (r.runStatus === 'continue') {
+        showTaskFromSession(r.sessionIndex, r.currentRunStats);
+        return;
+      }
+
+      pendingFinalize = {
+        queueIds: queueIds.slice(),
+        pairs: sessionLog.slice(),
+        runStatus: r.runStatus,
+        attempt: 0
+      };
+      saveSessionResult();
+    }
+
+    function saveSessionResult() {
+      if (!pendingFinalize || !currentUser) return;
+
+      showLoader(true);
+      document.getElementById('game-feedback').innerText = 'Сохраняем результат...';
+      document.getElementById('game-feedback').className = 'feedback';
+      document.getElementById('next-btn').style.display = 'none';
+
+      google.script.run
+        .withSuccessHandler(onFinalizeSuccess)
+        .withFailureHandler(onFinalizeFailure)
+        .finalizeSession(
+          currentUser.id,
+          currentUser.rowNum,
+          pendingFinalize.queueIds,
+          pendingFinalize.pairs,
+          pendingFinalize.runStatus
+        );
+    }
+
+    function onFinalizeSuccess(r) {
+      showLoader(false);
+      if (!r.success) {
+        onFinalizeError(r.message);
+        return;
+      }
+
+      const status = r.runStatus;
+      pendingFinalize = null;
+      clearSessionState();
+
+      if (status === 'win') {
+        switchScreen('screen-result');
+        document.getElementById('result-title').innerText = 'Ура!';
+        document.getElementById('result-text').innerText = 'Ступень пройдена!';
+      } else if (status === 'fail') {
+        switchScreen('screen-result');
+        document.getElementById('result-title').innerText = 'Упс!';
+        document.getElementById('result-text').innerText = '3 ошибки. Попробуем снова?';
+      } else if (status === 'all_clear') {
+        switchScreen('screen-result');
+        document.getElementById('result-title').innerText = 'Финиш!';
+        document.getElementById('result-text').innerText = 'Тренажер полностью пройден!';
+      }
+    }
+
+    function onFinalizeFailure(err) {
+      onFinalizeError(err.message);
+    }
+
+    function onFinalizeError(message) {
+      showLoader(false);
+      if (!pendingFinalize) return;
+
+      pendingFinalize.attempt += 1;
+
+      if (pendingFinalize.attempt >= MAX_SAVE_ATTEMPTS) {
+        alert('Не удалось сохранить результат после 3 попыток. Сессия потеряна.');
+        pendingFinalize = null;
+        clearSessionState();
+        switchScreen('screen-login');
+        return;
+      }
+
+      document.getElementById('game-feedback').className = 'feedback wrong';
+      document.getElementById('game-feedback').innerText =
+        'Ошибка сохранения (' + pendingFinalize.attempt + '/' + MAX_SAVE_ATTEMPTS + '): ' + message;
+
+      const nextBtn = document.getElementById('next-btn');
+      nextBtn.style.display = 'block';
+      nextBtn.innerText = 'Повторить сохранение';
+      nextBtn.onclick = saveSessionResult;
     }
 
     /**

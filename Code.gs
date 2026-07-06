@@ -25,7 +25,11 @@ function loginUser(login, pass) {
 
     return {
       success: true,
-      user: { id: data[0].toString(), name: data[1].toString() }
+      user: {
+        id: data[0].toString(),
+        name: data[1].toString(),
+        rowNum: userRow.rowNum
+      }
     };
   } catch (e) {
     return { success: false, message: "Ошибка авторизации на сервере: " + e.message };
@@ -33,88 +37,31 @@ function loginUser(login, pass) {
 }
 
 /**
- * Получение текущей задачи для ученика
+ * Получение задач для новой сессии (только чтение уровня, без записи в лог)
  * @param {string} userId
- * @param {boolean} startNewSession — true при первом запросе после входа (новая сессия)
+ * @param {boolean} startNewSession — оставлен для совместимости с клиентом
  */
 function getTaskForUser(userId, startNewSession) {
   try {
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Пользователи");
     const userRow = _getUserRowData(userId);
     if (!userRow) return { success: false, message: "Пользователь не найден." };
 
-    const row = userRow.rowNum;
-    let level = parseInt(userRow.data[7]); // Колонка H (8) - Текущая ступень
+    let level = parseInt(userRow.data[7]);
     if (isNaN(level)) level = 0;
 
-    if (startNewSession) {
-      _resetSessionCounters(sheet, row);
-      userRow.data[8] = 0;
-      userRow.data[9] = 0;
-    }
-
-    let верно = parseInt(userRow.data[8]) || 0;   // Колонка I (9)
-    let ошибки = parseInt(userRow.data[9]) || 0; // Колонка J (10)
-
-    // Если все 5 ступеней уже пройдены (ученик получил 5-ю ступень)
     if (level >= 5) {
       return { success: true, allCompleted: true };
     }
 
-    // Если школьник зашел с накопленным критическим числом ошибок (страховка)
-    if (ошибки >= 3) {
-      _resetSessionCounters(sheet, row);
-      верно = 0;
-      ошибки = 0;
-    }
-
-    const session = _parseCurrentSessionLog(sheet, row);
-    let completedPairsCount = session.completedPairsCount;
-    let activeTaskId = session.activeTaskId;
-    const usedTaskIds = session.usedTaskIds;
-
-    // Текущий порядковый номер попытки в этой сессии
-    const taskNumber = completedPairsCount + 1;
-
-    let currentTaskId = activeTaskId;
-
-    // Если активной задачи нет в логе, генерируем новую
-    if (!currentTaskId) {
-      const targetLevel = level + 1;
-      const allTasks = _getTasksByLevel(targetLevel);
-
-      const availableTasks = allTasks.filter(function(t) {
-        return usedTaskIds.indexOf(t.id.toString().trim()) === -1;
-      });
-
-      if (availableTasks.length === 0) {
-        return { success: false, message: "В базе данных нет доступных задач для Ступени " + targetLevel };
-      }
-
-      const randomTask = availableTasks[Math.floor(Math.random() * availableTasks.length)];
-      currentTaskId = randomTask.id;
-
-      const nextCellCol = session.sessionStartCol + (completedPairsCount * 2);
-      sheet.getRange(row, nextCellCol).setValue(currentTaskId);
-    }
-
-    const targetLevel = level + 1;
-    const allTasks = _getTasksByLevel(targetLevel);
-    const taskObj = allTasks.find(function(t) { return t.id.toString() === currentTaskId.toString(); });
-
-    if (!taskObj) {
-      return { success: false, message: "Задача с ID " + currentTaskId + " отсутствует во вкладке 'Задачи'." };
-    }
+    const queueData = _buildSessionQueue(level);
 
     return {
       success: true,
       allCompleted: false,
-      task: {
-        id: taskObj.id,
-        imageUrl: taskObj.imageUrl,
-        hint: taskObj.hint
-      },
-      currentRunStats: _buildRunStats(level, taskNumber, верно, ошибки)
+      sessionTasks: queueData.sessionTasks,
+      queueIds: queueData.queueIds,
+      sessionIndex: 0,
+      currentRunStats: _buildRunStats(level, 1, 0, 0)
     };
   } catch (e) {
     return { success: false, message: "Ошибка получения задачи: " + e.message };
@@ -122,108 +69,85 @@ function getTaskForUser(userId, startNewSession) {
 }
 
 /**
- * Проверка ответа и заполнение вердикта в логе
+ * Запись завершённой сессии в лог одним блоком (победа или поражение)
+ * @param {string} userId
+ * @param {number} rowNum — номер строки ученика (с loginUser)
+ * @param {string[]} queueIds — очередь из 10 ID задач
+ * @param {Object[]} pairs — [{taskId, isCorrect}, ...]
+ * @param {string} runStatus — "win" | "fail" | "all_clear"
  */
-function submitAnswer(userId, taskId, answer) {
+function finalizeSession(userId, rowNum, queueIds, pairs, runStatus) {
   try {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Пользователи");
-    const userRow = _getUserRowData(userId);
-    if (!userRow) return { success: false, message: "Пользователь не найден." };
+    let row = parseInt(rowNum, 10);
 
-    const row = userRow.rowNum;
-    let level = parseInt(userRow.data[7]);
+    if (isNaN(row) || row < 2) {
+      const userRow = _getUserRowData(userId);
+      if (!userRow) return { success: false, message: "Пользователь не найден." };
+      row = userRow.rowNum;
+    }
+
+    const userData = sheet.getRange(row, 8, 1, 3).getValues()[0];
+    let level = parseInt(userData[0]);
     if (isNaN(level)) level = 0;
 
-    let верно = parseInt(userRow.data[8]) || 0;
-    let ошибки = parseInt(userRow.data[9]) || 0;
-
-    const targetLevel = level + 1;
-    const allTasks = _getTasksByLevel(targetLevel);
-    const taskObj = allTasks.find(function(t) { return t.id.toString() === taskId.toString(); });
-    if (!taskObj) return { success: false, message: "Задача не найдена в базе данных." };
-
-    const correctAnswer = taskObj.answer.toString().trim();
-    const userAnswer = answer.toString().trim();
-    const isCorrect = userAnswer.toLowerCase() === correctAnswer.toLowerCase();
-
-    if (isCorrect) {
-      верно += 1;
-    } else {
-      ошибки += 1;
-    }
-
-    const session = _parseCurrentSessionLog(sheet, row);
-    let verdictCol = -1;
-
-    for (let i = 0; i < session.sessionSlice.length; i += 2) {
-      const tId = session.sessionSlice[i] ? session.sessionSlice[i].toString().trim() : "";
-      const verdict = session.sessionSlice[i + 1] ? session.sessionSlice[i + 1].toString().trim() : "";
-
-      if (tId === taskId.toString().trim() && verdict === "") {
-        verdictCol = session.sessionStartCol + i + 1;
-        break;
-      }
-    }
-
-    if (verdictCol === -1) {
-      const nextCol = session.sessionStartCol + (session.completedPairsCount * 2) + 1;
-      verdictCol = nextCol;
-    }
-
-    sheet.getRange(row, verdictCol).setValue(isCorrect ? "Да" : "Нет");
-
-    const completedPairsCount = session.completedPairsCount + 1;
-    let runStatus = "continue";
-    let responseStats = null;
-
-    if (ошибки >= 3) {
-      runStatus = "fail";
-      responseStats = _buildRunStats(level, completedPairsCount, верно, ошибки);
-      _resetSessionCounters(sheet, row);
-      верно = 0;
-      ошибки = 0;
-    } else if (верно >= 7) {
-      responseStats = _buildRunStats(level, completedPairsCount, 7, ошибки);
-      level += 1;
-      _resetSessionCounters(sheet, row);
-      верно = 0;
-      ошибки = 0;
-
-      if (level >= 5) {
-        runStatus = "all_clear";
+    let correctCount = 0;
+    let errorCount = 0;
+    for (let i = 0; i < pairs.length; i++) {
+      if (pairs[i].isCorrect) {
+        correctCount++;
       } else {
-        runStatus = "win";
+        errorCount++;
       }
     }
 
-    sheet.getRange(row, 8).setValue(level);
-    sheet.getRange(row, 9).setValue(верно);
-    sheet.getRange(row, 10).setValue(ошибки);
+    if (runStatus === "win" || runStatus === "all_clear") {
+      if (correctCount < 7) {
+        return { success: false, message: "Недостаточно верных ответов для победы." };
+      }
+    } else if (runStatus === "fail") {
+      if (errorCount < 3) {
+        return { success: false, message: "Недостаточно ошибок для поражения." };
+      }
+    } else {
+      return { success: false, message: "Неверный статус сессии." };
+    }
 
-    const taskNumber = (runStatus === "continue") ? (completedPairsCount + 1) : 1;
-    const updatedStats = responseStats || _buildRunStats(level, taskNumber, верно, ошибки);
+    const markerCol = _getNextLogColumn(sheet, row);
+    const logRow = ["##", queueIds.join(",")];
+    for (let i = 0; i < pairs.length; i++) {
+      logRow.push(pairs[i].taskId.toString());
+      logRow.push(pairs[i].isCorrect ? "Да" : "Нет");
+    }
+
+    sheet.getRange(row, markerCol, 1, logRow.length).setValues([logRow]);
+
+    let newLevel = level;
+    if (runStatus === "win" || runStatus === "all_clear") {
+      newLevel = level + 1;
+    }
+
+    sheet.getRange(row, 8, 1, 3).setValues([[newLevel, 0, 0]]);
+
+    let resultStatus = runStatus;
+    if ((runStatus === "win" || runStatus === "all_clear") && newLevel >= 5) {
+      resultStatus = "all_clear";
+    }
 
     return {
       success: true,
-      isCorrect: isCorrect,
-      correctAnswer: correctAnswer,
-      runStatus: runStatus,
-      currentRunStats: updatedStats,
-      stats: updatedStats
+      runStatus: resultStatus,
+      currentRunStats: _buildRunStats(newLevel, 1, 0, 0)
     };
-
   } catch (e) {
-    return { success: false, message: "Ошибка верификации ответа на бэкенде: " + e.message };
+    return { success: false, message: "Ошибка сохранения сессии: " + e.message };
   }
 }
 
 /**
- * Сброс счётчиков сессии (I, J) без стирания лога; маркер ## отделяет сессии
+ * Следующая свободная колонка лога (K…)
  */
-function _resetSessionCounters(sheet, row) {
-  sheet.getRange(row, 9).setValue(0);
-  sheet.getRange(row, 10).setValue(0);
-
+function _getNextLogColumn(sheet, row) {
   const lastColumn = sheet.getLastColumn();
   let nextCol = 11;
 
@@ -238,61 +162,35 @@ function _resetSessionCounters(sheet, row) {
     nextCol = lastFilledCol + 1;
   }
 
-  sheet.getRange(row, nextCol).setValue("##");
+  return nextCol;
 }
 
 /**
- * Разбор лога текущей сессии (после последнего маркера ##)
+ * Генерация очереди из 10 задач (только в памяти, без записи в таблицу)
  */
-function _parseCurrentSessionLog(sheet, row) {
-  const lastColumn = sheet.getLastColumn();
-  if (lastColumn < 11) {
-    return {
-      sessionStartCol: 11,
-      sessionSlice: [],
-      completedPairsCount: 0,
-      activeTaskId: null,
-      usedTaskIds: []
-    };
+function _buildSessionQueue(level) {
+  const SESSION_SIZE = 10;
+  const targetLevel = level + 1;
+  const allTasks = _getTasksByLevel(targetLevel);
+
+  if (allTasks.length < 7) {
+    throw new Error("В базе данных меньше 7 задач для Ступени " + targetLevel);
   }
 
-  const fullLog = sheet.getRange(row, 11, 1, lastColumn - 10).getValues()[0];
-  let sessionStartIndex = 0;
-
-  for (let i = 0; i < fullLog.length; i++) {
-    if (fullLog[i].toString().trim() === "##") {
-      sessionStartIndex = i + 1;
-    }
-  }
-
-  const sessionStartCol = 11 + sessionStartIndex;
-  const sessionSlice = fullLog.slice(sessionStartIndex);
-  const usedTaskIds = [];
-  let completedPairsCount = 0;
-  let activeTaskId = null;
-
-  for (let i = 0; i < sessionSlice.length; i += 2) {
-    const tId = sessionSlice[i] ? sessionSlice[i].toString().trim() : "";
-    const verdict = sessionSlice[i + 1] ? sessionSlice[i + 1].toString().trim() : "";
-
-    if (tId === "" || tId === "##") break;
-
-    usedTaskIds.push(tId);
-
-    if (verdict !== "") {
-      completedPairsCount++;
-    } else {
-      activeTaskId = tId;
-      break;
-    }
-  }
+  const shuffled = allTasks.slice().sort(function() { return Math.random() - 0.5; });
+  const picked = shuffled.slice(0, Math.min(SESSION_SIZE, shuffled.length));
+  const queueIds = picked.map(function(t) { return t.id.toString(); });
 
   return {
-    sessionStartCol: sessionStartCol,
-    sessionSlice: sessionSlice,
-    completedPairsCount: completedPairsCount,
-    activeTaskId: activeTaskId,
-    usedTaskIds: usedTaskIds
+    queueIds: queueIds,
+    sessionTasks: picked.map(function(t) {
+      return {
+        id: t.id,
+        imageUrl: t.imageUrl,
+        hint: t.hint,
+        answer: t.answer
+      };
+    })
   };
 }
 
