@@ -46,21 +46,87 @@
       .trainer-left { flex: 1 1 auto; max-width: none; min-width: 0; }
       .task-image-container { max-height: 42vh; min-height: 160px; }
     }
+
+    .auth-footer-links { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; gap: 12px; }
+    .auth-text-link { border: none; background: none; padding: 0; width: auto; color: var(--primary); font-size: 14px; font-weight: 600; cursor: pointer; text-decoration: underline; }
+    .auth-text-link:hover { color: #1565c0; }
+    .auth-back-link { margin-bottom: 12px; }
+    .auth-panel { display: none; }
+    .auth-panel.active { display: block; }
+    .auth-note { font-size: 13px; color: #64748B; margin: 10px 0 0; text-align: center; line-height: 1.4; }
+    .auth-field-label { font-size: 12px; color: #64748B; margin: 8px 0 4px; }
+    .auth-optional { font-size: 11px; color: #94A3B8; font-weight: normal; }
+    .auth-msg { text-align: center; font-size: 14px; margin-top: 10px; min-height: 20px; }
+    .auth-msg.ok { color: var(--success); }
+    .auth-msg.err { color: var(--danger); }
   </style>
 </head>
 <body>
   <div class="page">
   <div id="loader">Загрузка...</div>
 
-  <div id="screen-login" class="card">
+  <div id="screen-auth" class="card">
     <header class="app-header app-header--compact">
       <div class="app-logo" role="img" aria-label="Логотип Тренажер ВСЕМ ПЯТЬ!"></div>
-<div class="app-title">Тренажер &quot;ВСЕМ ПЯТЬ!&quot;</div>
+      <div class="app-title">Тренажер &quot;ВСЕМ ПЯТЬ!&quot;</div>
     </header>
-    <h2>Вход</h2>
-    <input type="text" id="login-input" placeholder="ID">
-    <input type="password" id="password-input" placeholder="Пароль">
-    <button onclick="handleLogin()">Войти</button>
+    <div id="panel-login" class="auth-panel active">
+      <input type="text" id="login-input" placeholder="ID, телефон или почта">
+      <input type="password" id="password-input" placeholder="Пароль" onkeydown="if(event.key==='Enter') handleLogin()">
+      <button onclick="handleLogin()">Войти</button>
+      <div class="auth-footer-links">
+        <button type="button" class="auth-text-link" onclick="showAuthTab('register')">Регистрация</button>
+        <button type="button" class="auth-text-link" onclick="showAuthTab('forgot')">Забыли пароль?</button>
+      </div>
+      <div id="login-msg" class="auth-msg"></div>
+    </div>
+
+    <div id="panel-register" class="auth-panel">
+      <button type="button" class="auth-text-link auth-back-link" onclick="showAuthTab('login')">← Вход</button>
+      <div class="auth-field-label">Имя *</div>
+      <input type="text" id="reg-name" placeholder="Имя">
+      <div class="auth-field-label">Телефон *</div>
+      <input type="tel" id="reg-phone" placeholder="Телефон">
+      <div class="auth-field-label">Почта *</div>
+      <input type="email" id="reg-email" placeholder="Почта">
+      <div class="auth-field-label">Пароль * (от 6 символов)</div>
+      <input type="password" id="reg-password" placeholder="Пароль">
+      <div class="auth-field-label">Повтор пароля *</div>
+      <input type="password" id="reg-password2" placeholder="Повтор пароля">
+      <div class="auth-field-label">Класс <span class="auth-optional">(необязательно)</span></div>
+      <input type="text" id="reg-class" placeholder="Класс">
+      <div class="auth-field-label">Город <span class="auth-optional">(необязательно)</span></div>
+      <input type="text" id="reg-city" placeholder="Город">
+      <div class="auth-field-label">Школа <span class="auth-optional">(необязательно)</span></div>
+      <input type="text" id="reg-school" placeholder="Школа">
+      <button onclick="handleRegister()" style="margin-top:10px;">Зарегистрироваться</button>
+      <div id="register-msg" class="auth-msg"></div>
+    </div>
+
+    <div id="panel-forgot" class="auth-panel">
+      <button type="button" class="auth-text-link auth-back-link" onclick="showAuthTab('login')">← Вход</button>
+      <p class="auth-note">Введите телефон или почту. Временный пароль из 4 цифр придёт на почту.</p>
+      <input type="text" id="forgot-input" placeholder="Телефон или почта">
+      <button onclick="handleForgotPassword()" style="margin-top:10px;">Отправить временный пароль</button>
+      <div id="forgot-msg" class="auth-msg"></div>
+    </div>
+  </div>
+
+  <div id="screen-change-password" class="card" style="display:none;">
+    <header class="app-header app-header--compact">
+      <div class="app-logo" role="img" aria-label="Логотип Тренажер ВСЕМ ПЯТЬ!"></div>
+      <div class="app-title">Тренажер &quot;ВСЕМ ПЯТЬ!&quot;</div>
+    </header>
+    <h2>Новый пароль</h2>
+    <p class="auth-note">Вы вошли с временным паролем. Придумайте постоянный (от 6 символов).</p>
+    <div class="auth-field-label">Временный пароль</div>
+    <input type="password" id="change-temp-pass" placeholder="4 цифры из письма">
+    <div class="auth-field-label">Новый пароль</div>
+    <input type="password" id="change-new-pass" placeholder="Новый пароль">
+    <div class="auth-field-label">Повтор нового пароля</div>
+    <input type="password" id="change-new-pass2" placeholder="Повтор" onkeydown="if(event.key==='Enter') handleChangePassword()">
+    <button onclick="handleChangePassword()" style="margin-top:10px;">Сохранить пароль</button>
+    <div id="change-pass-msg" class="auth-msg"></div>
   </div>
 
   <div id="screen-trainer" class="card trainer-card" style="display:none;">
@@ -149,7 +215,7 @@
         sessionExpired = true;
         clearSessionState();
         alert('Сессия завершена по таймауту (1 час). Войдите снова.');
-        switchScreen('screen-login');
+        switchScreen('screen-auth');
       }, SESSION_TIMEOUT_MS);
     }
 
@@ -163,10 +229,36 @@
       };
     }
 
+    function normalizeAnswer(str) {
+      let s = (str || '').toString().toLowerCase();
+      s = s.replace(/([0-9a-zа-яё])(и|или)([0-9a-zа-яё])/gi, '$1 $3');
+      s = s.replace(/[.,;:!?'"()[\]{}«»—–\-+\\/|@#$%^&*=_~`<>№]+/g, ' ');
+      const parts = s.split(/\s+/).filter(function(w) {
+        return w && w !== 'и' && w !== 'или';
+      });
+      return parts.join('');
+    }
+
+    function parseAnswerVariants(answerCell) {
+      const raw = (answerCell || '').toString();
+      if (!raw.trim()) return [];
+      return raw.split('##').map(function(v) { return v.trim(); }).filter(Boolean);
+    }
+
     function checkAnswerLocally(userAnswer, task) {
-      const correctAnswer = (task.answer || '').toString().trim();
-      const isCorrect = userAnswer.toLowerCase() === correctAnswer.toLowerCase();
-      return { isCorrect: isCorrect, correctAnswer: correctAnswer };
+      const variants = parseAnswerVariants(task.answer);
+      const normalizedUser = normalizeAnswer(userAnswer);
+      const primaryDisplay = variants.length ? variants[0] : '';
+
+      let isCorrect = false;
+      for (let i = 0; i < variants.length; i++) {
+        if (normalizeAnswer(variants[i]) === normalizedUser) {
+          isCorrect = true;
+          break;
+        }
+      }
+
+      return { isCorrect: isCorrect, correctAnswer: primaryDisplay };
     }
 
     function showHint() {
@@ -193,6 +285,98 @@
 
     function showLoader(v) { document.getElementById('loader').style.display = v ? 'flex' : 'none'; }
     function switchScreen(s) { document.querySelectorAll('.card').forEach(c => c.style.display='none'); document.getElementById(s).style.display='block'; }
+    function showAuthTab(tab) {
+      ['login', 'register', 'forgot'].forEach(function(t) {
+        document.getElementById('panel-' + t).classList.toggle('active', t === tab);
+      });
+    }
+
+    function setAuthMsg(id, text, ok) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.innerText = text || '';
+      el.className = 'auth-msg' + (text ? (ok ? ' ok' : ' err') : '');
+    }
+
+    function handleRegister() {
+      const pass = document.getElementById('reg-password').value;
+      const pass2 = document.getElementById('reg-password2').value;
+      if (pass !== pass2) {
+        setAuthMsg('register-msg', 'Пароли не совпадают.', false);
+        return;
+      }
+      showLoader(true);
+      setAuthMsg('register-msg', '', true);
+      google.script.run
+        .withSuccessHandler(function(r) {
+          showLoader(false);
+          if (!r.success) return setAuthMsg('register-msg', r.message, false);
+          setAuthMsg('register-msg', r.message, true);
+          showAuthTab('login');
+          document.getElementById('login-input').value = '';
+          document.getElementById('password-input').value = '';
+        })
+        .withFailureHandler(function(err) {
+          showLoader(false);
+          handleScriptFailure(err);
+        })
+        .registerUser(
+          document.getElementById('reg-name').value,
+          document.getElementById('reg-phone').value,
+          document.getElementById('reg-email').value,
+          pass,
+          document.getElementById('reg-class').value,
+          document.getElementById('reg-city').value,
+          document.getElementById('reg-school').value
+        );
+    }
+
+    function handleForgotPassword() {
+      showLoader(true);
+      setAuthMsg('forgot-msg', '', true);
+      google.script.run
+        .withSuccessHandler(function(r) {
+          showLoader(false);
+          if (r.success) {
+            setAuthMsg('login-msg', r.message, true);
+            showAuthTab('login');
+          } else {
+            setAuthMsg('forgot-msg', r.message, false);
+          }
+        })
+        .withFailureHandler(function(err) {
+          showLoader(false);
+          handleScriptFailure(err);
+        })
+        .requestPasswordReset(document.getElementById('forgot-input').value);
+    }
+
+    function handleChangePassword() {
+      if (!currentUser) return;
+      showLoader(true);
+      setAuthMsg('change-pass-msg', '', true);
+      google.script.run
+        .withSuccessHandler(function(r) {
+          showLoader(false);
+          if (!r.success) return setAuthMsg('change-pass-msg', r.message, false);
+          setAuthMsg('change-pass-msg', r.message, true);
+          isFirstTaskAfterLogin = true;
+          switchScreen('screen-trainer');
+          loadNextTask();
+        })
+        .withFailureHandler(function(err) {
+          showLoader(false);
+          handleScriptFailure(err);
+        })
+        .setPermanentPassword(
+          currentUser.id,
+          document.getElementById('change-temp-pass').value,
+          document.getElementById('change-new-pass').value,
+          document.getElementById('change-new-pass2').value
+        );
+    }
+
+
 
     function renderHearts(e) {
       let h = '';
@@ -282,18 +466,28 @@
 
     function handleLogin() {
       showLoader(true);
+      setAuthMsg('login-msg', '', true);
       google.script.run
-        .withSuccessHandler(r => {
+        .withSuccessHandler(function(r) {
           showLoader(false);
-          if(r.success) {
-            currentUser = r.user;
-            isFirstTaskAfterLogin = true;
-            clearSessionState();
-            document.getElementById('stat-name').innerText = r.user.name;
-            switchScreen('screen-trainer');
-            loadNextTask();
+          if (!r.success) {
+            setAuthMsg('login-msg', r.message, false);
+            return;
           }
-          else alert(r.message);
+          currentUser = r.user;
+          clearSessionState();
+          document.getElementById('stat-name').innerText = r.user.name;
+          if (r.mustChangePassword) {
+            document.getElementById('change-temp-pass').value = '';
+            document.getElementById('change-new-pass').value = '';
+            document.getElementById('change-new-pass2').value = '';
+            setAuthMsg('change-pass-msg', '', true);
+            switchScreen('screen-change-password');
+            return;
+          }
+          isFirstTaskAfterLogin = true;
+          switchScreen('screen-trainer');
+          loadNextTask();
         })
         .withFailureHandler(handleScriptFailure)
         .loginUser(document.getElementById('login-input').value, document.getElementById('password-input').value);
@@ -444,7 +638,7 @@
         alert('Не удалось сохранить результат после 3 попыток. Сессия потеряна.');
         pendingFinalize = null;
         clearSessionState();
-        switchScreen('screen-login');
+        switchScreen('screen-auth');
         return;
       }
 

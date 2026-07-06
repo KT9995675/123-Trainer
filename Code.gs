@@ -3,19 +3,37 @@
  */
 function doGet() {
   return HtmlService.createHtmlOutputFromFile('Index')
-      .setTitle('Математический Тренажер')
+      .setTitle('Тренажер "ВСЕМ ПЯТЬ!"')
       .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
+/** Колонка K = почта; лог с колонки L (12) */
+var LOG_START_COL = 12;
+var USER_DATA_COLS = 11;
+var MIN_PASSWORD_LEN = 6;
+var RESET_WINDOW_MS = 3 * 60 * 60 * 1000;
+var MAX_RESETS_IN_WINDOW = 2;
+
 /**
- * Авторизация пользователя по Логину (ID) и Паролю
- * Структура: A=ID, B=Имя, C=Пароль
+ * Один раз запустить вручную из редактора Apps Script (▶ Выполнить)
+ * для выдачи разрешения MailApp.sendEmail. Письмо придёт на вашу почту.
+ */
+function authorizeMailOnce() {
+  const email = Session.getActiveUser().getEmail();
+  if (!email) {
+    throw new Error("Не удалось определить вашу почту. Запустите функцию, будучи залогиненным владельцем таблицы.");
+  }
+  MailApp.sendEmail(email, 'Тренажер — тест разрешения на почту', 'MailApp авторизован. Восстановление пароля будет работать.');
+}
+
+/**
+ * Авторизация: логин = ID, телефон или почта
  */
 function loginUser(login, pass) {
   try {
-    const userRow = _getUserRowData(login);
+    const userRow = _findUserByLogin(login);
     if (!userRow) {
-      return { success: false, message: "Пользователь с таким логином не найден." };
+      return { success: false, message: "Пользователь не найден. Проверьте логин." };
     }
 
     const data = userRow.data;
@@ -23,16 +41,157 @@ function loginUser(login, pass) {
       return { success: false, message: "Неверный пароль. Попробуйте еще раз." };
     }
 
+    const userId = data[0].toString();
+    const mustChangePassword = _isPasswordTemp(userId);
+
     return {
       success: true,
+      mustChangePassword: mustChangePassword,
       user: {
-        id: data[0].toString(),
+        id: userId,
         name: data[1].toString(),
         rowNum: userRow.rowNum
       }
     };
   } catch (e) {
     return { success: false, message: "Ошибка авторизации на сервере: " + e.message };
+  }
+}
+
+/**
+ * Регистрация нового ученика
+ */
+function registerUser(name, phone, email, password, schoolClass, city, school) {
+  try {
+    const cleanName = (name || "").toString().trim();
+    const cleanPhone = _normalizePhone(phone);
+    const cleanEmail = _normalizeEmail(email);
+    const cleanPass = (password || "").toString().trim();
+    const cleanClass = (schoolClass || "").toString().trim();
+    const cleanCity = (city || "").toString().trim();
+    const cleanSchool = (school || "").toString().trim();
+
+    if (!cleanName) return { success: false, message: "Укажите имя." };
+    if (!cleanPhone) return { success: false, message: "Укажите телефон." };
+    if (!_isValidEmail(cleanEmail)) return { success: false, message: "Укажите корректную почту." };
+    if (cleanPass.length < MIN_PASSWORD_LEN) {
+      return { success: false, message: "Пароль должен быть не короче " + MIN_PASSWORD_LEN + " символов." };
+    }
+
+    if (_isPhoneTaken(cleanPhone)) {
+      return { success: false, message: "Пользователь с таким телефоном уже зарегистрирован." };
+    }
+    if (_isEmailTaken(cleanEmail)) {
+      return { success: false, message: "Пользователь с такой почтой уже зарегистрирован." };
+    }
+
+    const newId = _generateNextUserId();
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Пользователи");
+    sheet.appendRow([
+      newId,
+      cleanName,
+      cleanPass,
+      cleanPhone,
+      cleanClass,
+      cleanCity,
+      cleanSchool,
+      0,
+      0,
+      0,
+      cleanEmail
+    ]);
+
+    return {
+      success: true,
+      userId: newId.toString(),
+      message: "Регистрация успешна! Запомните ваш ID: " + newId
+    };
+  } catch (e) {
+    return { success: false, message: "Ошибка регистрации: " + e.message };
+  }
+}
+
+/**
+ * Восстановление пароля: 4 цифры на почту, не более 2 раз за 3 часа
+ */
+function requestPasswordReset(identifier) {
+  try {
+    const userRow = _findUserByPhoneOrEmail(identifier);
+    if (!userRow) {
+      return { success: false, message: "Пользователь с таким телефоном или почтой не найден." };
+    }
+
+    const userId = userRow.data[0].toString();
+    const email = _normalizeEmail(userRow.data[10]);
+    if (!email) {
+      return { success: false, message: "У учетной записи не указана почта. Обратитесь к администратору." };
+    }
+
+    const limit = _canRequestPasswordReset(userId);
+    if (!limit.allowed) {
+      return {
+        success: false,
+        message: "Слишком много запросов. Повторите через " + limit.waitMinutes + " мин."
+      };
+    }
+
+    const tempPassword = _generateTempPassword();
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Пользователи");
+    sheet.getRange(userRow.rowNum, 3).setValue(tempPassword);
+    _setPasswordTempFlag(userId);
+    _recordResetAttempt(userId);
+
+    MailApp.sendEmail({
+      to: email,
+      subject: 'Тренажер "ВСЕМ ПЯТЬ!" — временный пароль',
+      body: "Здравствуйте, " + userRow.data[1].toString() + "!\n\n" +
+        "Ваш временный пароль: " + tempPassword + "\n\n" +
+        "Войдите с этим паролем — система сразу попросит придумать новый постоянный.\n\n" +
+        "Если вы не запрашивали восстановление, сообщите администратору."
+    });
+
+    return {
+      success: true,
+      message: "Зайдите на почту " + _maskEmail(email) + ". В письме — временный пароль из 4 цифр. Введите его при входе."
+    };
+  } catch (e) {
+    return { success: false, message: "Ошибка восстановления пароля: " + e.message };
+  }
+}
+
+/**
+ * Установка постоянного пароля после входа с временным
+ */
+function setPermanentPassword(userId, tempPassword, newPassword, confirmPassword) {
+  try {
+    const userRow = _getUserRowData(userId);
+    if (!userRow) return { success: false, message: "Пользователь не найден." };
+
+    if (!_isPasswordTemp(userId)) {
+      return { success: false, message: "Смена пароля не требуется." };
+    }
+
+    const currentPass = userRow.data[2].toString().trim();
+    if (currentPass !== (tempPassword || "").toString().trim()) {
+      return { success: false, message: "Неверный текущий (временный) пароль." };
+    }
+
+    const cleanNew = (newPassword || "").toString().trim();
+    const cleanConfirm = (confirmPassword || "").toString().trim();
+    if (cleanNew.length < MIN_PASSWORD_LEN) {
+      return { success: false, message: "Новый пароль — не короче " + MIN_PASSWORD_LEN + " символов." };
+    }
+    if (cleanNew !== cleanConfirm) {
+      return { success: false, message: "Пароли не совпадают." };
+    }
+
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Пользователи");
+    sheet.getRange(userRow.rowNum, 3).setValue(cleanNew);
+    _clearPasswordTempFlag(userId);
+
+    return { success: true, message: "Пароль успешно изменён." };
+  } catch (e) {
+    return { success: false, message: "Ошибка смены пароля: " + e.message };
   }
 }
 
@@ -70,11 +229,6 @@ function getTaskForUser(userId, startNewSession) {
 
 /**
  * Запись завершённой сессии в лог одним блоком (победа или поражение)
- * @param {string} userId
- * @param {number} rowNum — номер строки ученика (с loginUser)
- * @param {string[]} queueIds — очередь из 10 ID задач
- * @param {Object[]} pairs — [{taskId, isCorrect}, ...]
- * @param {string} runStatus — "win" | "fail" | "all_clear"
  */
 function finalizeSession(userId, rowNum, queueIds, pairs, runStatus) {
   try {
@@ -145,18 +299,19 @@ function finalizeSession(userId, rowNum, queueIds, pairs, runStatus) {
 }
 
 /**
- * Следующая свободная колонка лога (K…)
+ * Следующая свободная колонка лога (L…)
  */
 function _getNextLogColumn(sheet, row) {
   const lastColumn = sheet.getLastColumn();
-  let nextCol = 11;
+  let nextCol = LOG_START_COL;
 
-  if (lastColumn >= 11) {
-    const logValues = sheet.getRange(row, 11, 1, lastColumn - 10).getValues()[0];
-    let lastFilledCol = 10;
+  if (lastColumn >= LOG_START_COL) {
+    const width = lastColumn - LOG_START_COL + 1;
+    const logValues = sheet.getRange(row, LOG_START_COL, 1, width).getValues()[0];
+    let lastFilledCol = LOG_START_COL - 1;
     for (let i = 0; i < logValues.length; i++) {
       if (logValues[i] !== "" && logValues[i] !== null) {
-        lastFilledCol = 11 + i;
+        lastFilledCol = LOG_START_COL + i;
       }
     }
     nextCol = lastFilledCol + 1;
@@ -208,20 +363,185 @@ function _buildRunStats(level, taskNumber, correctCount, errorCount) {
 }
 
 /**
- * ВНУТРЕННИЙ ПОИСК ПОЛЬЗОВАТЕЛЯ (Считывает первые 10 колонок A-J)
+ * Поиск пользователя по ID
  */
 function _getUserRowData(userId) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Пользователи");
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return null;
 
-  const data = sheet.getRange(1, 1, lastRow, 10).getValues();
-  for (let i = 1; i < data.length; i++) {
+  const data = sheet.getRange(2, 1, lastRow - 1, USER_DATA_COLS).getValues();
+  for (let i = 0; i < data.length; i++) {
     if (data[i][0].toString().trim() === userId.toString().trim()) {
-      return { rowNum: i + 1, data: data[i] };
+      return { rowNum: i + 2, data: data[i] };
     }
   }
   return null;
+}
+
+/**
+ * Поиск по ID, телефону или почте (для входа)
+ */
+function _findUserByLogin(login) {
+  const key = (login || "").toString().trim();
+  if (!key) return null;
+
+  const normPhone = _normalizePhone(key);
+  const normEmail = _normalizeEmail(key);
+  const all = _getAllUserRows();
+
+  for (let i = 0; i < all.length; i++) {
+    const row = all[i];
+    const data = row.data;
+    if (data[0].toString().trim() === key) return row;
+    if (normPhone && _normalizePhone(data[3]) === normPhone) return row;
+    if (normEmail && _normalizeEmail(data[10]) === normEmail) return row;
+  }
+  return null;
+}
+
+/**
+ * Поиск по телефону или почте (для восстановления)
+ */
+function _findUserByPhoneOrEmail(identifier) {
+  const normPhone = _normalizePhone(identifier);
+  const normEmail = _normalizeEmail(identifier);
+  if (!normPhone && !normEmail) return null;
+
+  const all = _getAllUserRows();
+  for (let i = 0; i < all.length; i++) {
+    const data = all[i].data;
+    if (normPhone && _normalizePhone(data[3]) === normPhone) return all[i];
+    if (normEmail && _normalizeEmail(data[10]) === normEmail) return all[i];
+  }
+  return null;
+}
+
+function _getAllUserRows() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Пользователи");
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return [];
+
+  const data = sheet.getRange(2, 1, lastRow - 1, USER_DATA_COLS).getValues();
+  const rows = [];
+  for (let i = 0; i < data.length; i++) {
+    if (!data[i][0]) continue;
+    rows.push({ rowNum: i + 2, data: data[i] });
+  }
+  return rows;
+}
+
+function _isPhoneTaken(phone) {
+  const norm = _normalizePhone(phone);
+  const all = _getAllUserRows();
+  for (let i = 0; i < all.length; i++) {
+    if (_normalizePhone(all[i].data[3]) === norm) return true;
+  }
+  return false;
+}
+
+function _isEmailTaken(email) {
+  const norm = _normalizeEmail(email);
+  const all = _getAllUserRows();
+  for (let i = 0; i < all.length; i++) {
+    if (_normalizeEmail(all[i].data[10]) === norm) return true;
+  }
+  return false;
+}
+
+function _generateNextUserId() {
+  const all = _getAllUserRows();
+  let maxId = 1000;
+  for (let i = 0; i < all.length; i++) {
+    const id = parseInt(all[i].data[0], 10);
+    if (!isNaN(id) && id > maxId) maxId = id;
+  }
+  return maxId + 1;
+}
+
+function _generateTempPassword() {
+  return Math.floor(1000 + Math.random() * 9000).toString();
+}
+
+function _normalizePhone(phone) {
+  const digits = (phone || "").toString().replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.length === 11 && digits.charAt(0) === "8") {
+    return "7" + digits.substring(1);
+  }
+  return digits;
+}
+
+function _normalizeEmail(email) {
+  return (email || "").toString().trim().toLowerCase();
+}
+
+function _isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function _maskEmail(email) {
+  const parts = email.split("@");
+  if (parts.length !== 2) return email;
+  const name = parts[0];
+  const masked = name.length <= 2 ? "**" : name.substring(0, 2) + "***";
+  return masked + "@" + parts[1];
+}
+
+function _pwdTempKey(userId) {
+  return "pwdTemp_" + userId.toString().trim();
+}
+
+function _setPasswordTempFlag(userId) {
+  PropertiesService.getScriptProperties().setProperty(_pwdTempKey(userId), "1");
+}
+
+function _clearPasswordTempFlag(userId) {
+  PropertiesService.getScriptProperties().deleteProperty(_pwdTempKey(userId));
+}
+
+function _isPasswordTemp(userId) {
+  return PropertiesService.getScriptProperties().getProperty(_pwdTempKey(userId)) === "1";
+}
+
+function _resetAttemptsKey(userId) {
+  return "reset_" + userId.toString().trim();
+}
+
+function _getResetAttempts(userId) {
+  const raw = PropertiesService.getScriptProperties().getProperty(_resetAttemptsKey(userId));
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    const now = Date.now();
+    return arr.filter(function(t) { return now - t < RESET_WINDOW_MS; });
+  } catch (e) {
+    return [];
+  }
+}
+
+function _recordResetAttempt(userId) {
+  const attempts = _getResetAttempts(userId);
+  attempts.push(Date.now());
+  PropertiesService.getScriptProperties().setProperty(
+    _resetAttemptsKey(userId),
+    JSON.stringify(attempts)
+  );
+}
+
+function _canRequestPasswordReset(userId) {
+  const now = Date.now();
+  const attempts = _getResetAttempts(userId).filter(function(t) { return now - t < RESET_WINDOW_MS; });
+  if (attempts.length < MAX_RESETS_IN_WINDOW) {
+    return { allowed: true };
+  }
+  const sorted = attempts.slice().sort(function(a, b) { return a - b; });
+  const unlockAt = sorted[MAX_RESETS_IN_WINDOW - 1] + RESET_WINDOW_MS;
+  if (now < unlockAt) {
+    return { allowed: false, waitMinutes: Math.ceil((unlockAt - now) / 60000) };
+  }
+  PropertiesService.getScriptProperties().deleteProperty(_resetAttemptsKey(userId));
+  return { allowed: true };
 }
 
 /**
@@ -240,7 +560,6 @@ function _getTasksByLevel(level) {
     const taskId = data[i][0].toString().trim();
     if (!taskId) continue;
 
-    // Первая цифра ID = номер ступени (101 → 1, 205 → 2)
     if (taskId.charAt(0) === levelDigit) {
       tasks.push({
         id: taskId,
@@ -251,4 +570,45 @@ function _getTasksByLevel(level) {
     }
   }
   return tasks;
+}
+
+/**
+ * Служебная: собрать ссылки на файлы из папки Google Drive
+ * Запускать вручную из редактора Apps Script (▶ Выполнить).
+ * Перед запуском подставьте ID папки в FOLDER_ID.
+ */
+function getFileLinks() {
+  try {
+    const FOLDER_ID = "1sbuWOiX7UiQr8P1M44lNPP4kdkW7839U";
+    const folder = DriveApp.getFolderById(FOLDER_ID);
+    const files = folder.getFiles();
+    const links = [];
+
+    while (files.hasNext()) {
+      const file = files.next();
+      links.push(file.getUrl());
+    }
+
+    if (links.length === 0) {
+      Logger.log("В папке нет файлов.");
+      return { success: false, message: "В папке нет файлов." };
+    }
+
+    Logger.log(links.join("\n"));
+
+    const doc = DocumentApp.create("Ссылки на файлы");
+    doc.getBody().appendParagraph(links.join("\n"));
+    doc.saveAndClose();
+    Logger.log("Документ создан: " + doc.getUrl());
+
+    return {
+      success: true,
+      count: links.length,
+      docUrl: doc.getUrl(),
+      links: links
+    };
+  } catch (e) {
+    Logger.log("Ошибка getFileLinks: " + e.message);
+    return { success: false, message: e.message };
+  }
 }
