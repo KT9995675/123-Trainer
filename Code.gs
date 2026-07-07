@@ -573,39 +573,56 @@ function _getTasksByLevel(level) {
 }
 
 /**
- * Служебная: собрать ссылки на файлы из папки Google Drive
+ * Служебная: собрать ссылки на файлы из папки Google Drive (с именами)
  * Запускать вручную из редактора Apps Script (▶ Выполнить).
- * Перед запуском подставьте ID папки в FOLDER_ID.
+ * Результат: журнал выполнения + новый Google Doc «Ссылки на файлы» в корне Диска.
  */
 function getFileLinks() {
   try {
     const FOLDER_ID = "1sbuWOiX7UiQr8P1M44lNPP4kdkW7839U";
     const folder = DriveApp.getFolderById(FOLDER_ID);
     const files = folder.getFiles();
-    const links = [];
+    const items = [];
 
     while (files.hasNext()) {
       const file = files.next();
-      links.push(file.getUrl());
+      items.push({
+        name: file.getName(),
+        url: file.getUrl()
+      });
     }
 
-    if (links.length === 0) {
+    if (items.length === 0) {
       Logger.log("В папке нет файлов.");
       return { success: false, message: "В папке нет файлов." };
     }
 
-    Logger.log(links.join("\n"));
+    items.sort(function(a, b) {
+      return a.name.localeCompare(b.name, "ru");
+    });
+
+    const lines = items.map(function(item) {
+      return item.name + " | " + item.url;
+    });
+
+    Logger.log(lines.join("\n"));
 
     const doc = DocumentApp.create("Ссылки на файлы");
-    doc.getBody().appendParagraph(links.join("\n"));
+    const body = doc.getBody();
+    body.appendParagraph("Папка: " + folder.getName());
+    body.appendParagraph("Файлов: " + items.length);
+    body.appendParagraph("");
+    lines.forEach(function(line) {
+      body.appendParagraph(line);
+    });
     doc.saveAndClose();
     Logger.log("Документ создан: " + doc.getUrl());
 
     return {
       success: true,
-      count: links.length,
+      count: items.length,
       docUrl: doc.getUrl(),
-      links: links
+      items: items
     };
   } catch (e) {
     Logger.log("Ошибка getFileLinks: " + e.message);
