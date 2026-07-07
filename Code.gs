@@ -10,6 +10,10 @@ function doGet() {
 /** Колонка K = почта; лог с колонки L (12) */
 var LOG_START_COL = 12;
 var USER_DATA_COLS = 11;
+/** Лист «Задачи»: E=Тема, F=Показы, G=Решено, H=Сложность (формула в таблице) */
+var TASK_COL_TOPIC = 5;
+var TASK_COL_SHOWS = 6;
+var TASK_COL_SOLVED = 7;
 var MIN_PASSWORD_LEN = 6;
 var RESET_WINDOW_MS = 3 * 60 * 60 * 1000;
 var MAX_RESETS_IN_WINDOW = 2;
@@ -283,6 +287,8 @@ function finalizeSession(userId, rowNum, queueIds, pairs, runStatus) {
 
     sheet.getRange(row, 8, 1, 3).setValues([[newLevel, 0, 0]]);
 
+    _updateTaskStats(pairs);
+
     let resultStatus = runStatus;
     if ((runStatus === "win" || runStatus === "all_clear") && newLevel >= 5) {
       resultStatus = "all_clear";
@@ -295,6 +301,54 @@ function finalizeSession(userId, rowNum, queueIds, pairs, runStatus) {
     };
   } catch (e) {
     return { success: false, message: "Ошибка сохранения сессии: " + e.message };
+  }
+}
+
+/**
+ * Обновление счётчиков Показы (F) и Решено (G) на листе «Задачи»
+ * Сложность (H) — формула в ячейках таблицы.
+ * @param {Object[]} pairs - [{taskId, isCorrect}, ...]
+ */
+function _updateTaskStats(pairs) {
+  if (!pairs || pairs.length === 0) return;
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Задачи");
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return;
+
+  const data = sheet.getRange(2, 1, lastRow - 1, TASK_COL_SOLVED).getValues();
+  const rowById = {};
+
+  for (let i = 0; i < data.length; i++) {
+    const id = data[i][0].toString().trim();
+    if (id) rowById[id] = i;
+  }
+
+  const increments = {};
+  for (let i = 0; i < pairs.length; i++) {
+    const taskId = pairs[i].taskId.toString().trim();
+    if (!taskId) continue;
+    if (!increments[taskId]) {
+      increments[taskId] = { shows: 0, solved: 0 };
+    }
+    increments[taskId].shows++;
+    if (pairs[i].isCorrect) {
+      increments[taskId].solved++;
+    }
+  }
+
+  for (const taskId in increments) {
+    const rowIdx = rowById[taskId];
+    if (rowIdx === undefined) continue;
+
+    const inc = increments[taskId];
+    let shows = parseInt(data[rowIdx][TASK_COL_SHOWS - 1], 10) || 0;
+    let solved = parseInt(data[rowIdx][TASK_COL_SOLVED - 1], 10) || 0;
+
+    shows += inc.shows;
+    solved += inc.solved;
+
+    sheet.getRange(rowIdx + 2, TASK_COL_SHOWS, 1, 2).setValues([[shows, solved]]);
   }
 }
 
@@ -552,7 +606,7 @@ function _getTasksByLevel(level) {
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return [];
 
-  const data = sheet.getRange(1, 1, lastRow, 4).getValues();
+  const data = sheet.getRange(1, 1, lastRow, TASK_COL_TOPIC).getValues();
   const tasks = [];
   const levelDigit = level.toString();
 
@@ -565,7 +619,8 @@ function _getTasksByLevel(level) {
         id: taskId,
         imageUrl: data[i][1],
         hint: data[i][2],
-        answer: data[i][3]
+        answer: data[i][3],
+        topic: data[i][4] ? data[i][4].toString() : ""
       });
     }
   }
