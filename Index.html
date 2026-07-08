@@ -95,6 +95,22 @@
     .auth-msg { text-align: center; font-size: 14px; margin-top: 10px; min-height: 20px; }
     .auth-msg.ok { color: var(--success); }
     .auth-msg.err { color: var(--danger); }
+
+    .card-home { max-width: 640px; margin-left: auto; margin-right: auto; padding: 20px 24px; }
+    .home-greeting { font-size: 1.1rem; font-weight: 700; color: var(--brand-blue); text-align: center; margin: 12px 0 18px; line-height: 1.4; }
+    .home-section { margin-bottom: 18px; }
+    .home-section h3 { font-size: 0.95rem; color: #475569; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.03em; }
+    .home-list { list-style: none; font-size: 14px; line-height: 1.5; }
+    .home-list li { padding: 4px 0; border-bottom: 1px solid #F1F5F9; }
+    .home-list li:last-child { border-bottom: none; }
+    .home-empty { color: #94A3B8; font-size: 14px; font-style: italic; }
+    .home-steps { display: flex; flex-direction: column; gap: 8px; }
+    .home-step-btn { text-align: left; padding: 12px 14px; background: var(--primary); }
+    .home-step-btn.taken { background: #5B8DEF; }
+    .home-step-btn.assault { background: #1E6FD9; }
+    .home-step-btn:disabled { background: #CBD5E1; color: #64748B; cursor: default; opacity: 1; }
+    .home-step-title { display: block; font-size: 16px; font-weight: 700; }
+    .home-step-meta { display: block; font-size: 13px; font-weight: normal; opacity: 0.9; margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -165,6 +181,34 @@
     <div id="change-pass-msg" class="auth-msg"></div>
   </div>
 
+  <div id="screen-home" class="card card-home" style="display:none;">
+    <header class="app-header app-header--compact">
+      <div class="app-logo" role="img" aria-label="Логотип Тренажер ВСЕМ ПЯТЬ!"></div>
+      <div class="app-title">Тренажер &quot;ВСЕМ ПЯТЬ!&quot;</div>
+    </header>
+    <p id="home-greeting" class="home-greeting"></p>
+
+    <section class="home-section">
+      <h3>Темы</h3>
+      <ul id="home-topics" class="home-list"></ul>
+    </section>
+
+    <section class="home-section">
+      <h3>Твои лучшие 5 тем</h3>
+      <ul id="home-top-topics" class="home-list"></ul>
+    </section>
+
+    <section class="home-section">
+      <h3>Эти темы пора усилить</h3>
+      <ul id="home-weak-topics" class="home-list"></ul>
+    </section>
+
+    <section class="home-section">
+      <h3>Выбор ступени</h3>
+      <div id="home-steps" class="home-steps"></div>
+    </section>
+  </div>
+
   <div id="screen-trainer" class="card trainer-card" style="display:none;">
     <div class="trainer-split">
       <div class="trainer-left">
@@ -210,12 +254,12 @@
     </header>
     <h2 id="result-title"></h2>
     <p id="result-text" style="text-align:center; margin-bottom:20px;"></p>
-    <button onclick="switchScreen('screen-trainer'); needsNewSession=true; loadNextTask();">Продолжить</button>
+    <button onclick="loadTrainerHome()">Продолжить</button>
   </div>
 
   <script>
     let currentUser = null, currentTask = null, lastResponse = null;
-    let isFirstTaskAfterLogin = false, needsNewSession = false;
+    let playingStep = null;
     let sessionTasks = [], sessionIndex = 0, runStats = null, answerPending = false;
     let sessionLog = [], queueIds = [], pendingFinalize = null;
     let sessionTimeoutId = null, sessionExpired = false;
@@ -237,6 +281,7 @@
       pendingFinalize = null;
       sessionIndex = 0;
       currentTask = null;
+      playingStep = null;
       sessionExpired = false;
       if (sessionTimeoutId) {
         clearTimeout(sessionTimeoutId);
@@ -255,9 +300,10 @@
       }, SESSION_TIMEOUT_MS);
     }
 
-    function buildLocalRunStats(level, taskNumber, correctCount, errorCount) {
+    function buildLocalRunStats(level, taskNumber, correctCount, errorCount, step) {
       return {
         studentLevel: level,
+        playingStep: step || playingStep,
         taskNumber: taskNumber,
         errors: errorCount,
         correctInSession: correctCount,
@@ -396,9 +442,7 @@
           showLoader(false);
           if (!r.success) return setAuthMsg('change-pass-msg', r.message, false);
           setAuthMsg('change-pass-msg', r.message, true);
-          isFirstTaskAfterLogin = true;
-          switchScreen('screen-trainer');
-          loadNextTask();
+          loadTrainerHome();
         })
         .withFailureHandler(function(err) {
           showLoader(false);
@@ -560,6 +604,112 @@
       renderSessionStats(stats);
     }
 
+    function renderTopicList(elId, items, emptyText) {
+      const el = document.getElementById(elId);
+      el.innerHTML = '';
+      if (!items || !items.length) {
+        el.innerHTML = '<li class="home-empty">' + emptyText + '</li>';
+        return;
+      }
+      items.forEach(function(item) {
+        const li = document.createElement('li');
+        li.textContent = item.name + ' — ' + item.percent + '% (' + item.correct + '/' + item.attempts + ')';
+        el.appendChild(li);
+      });
+    }
+
+    function renderTrainerHome(r) {
+      if (!r.success) return alert(r.message);
+
+      document.getElementById('home-greeting').innerText = r.greeting;
+      renderTopicList('home-topics', r.topics, 'Пока нет решённых задач.');
+      renderTopicList('home-top-topics', r.topTopics, 'Мало данных (нужно от 2 попыток по теме).');
+      renderTopicList('home-weak-topics', r.weakTopics, 'Мало данных (нужно от 2 попыток по теме).');
+
+      const stepsEl = document.getElementById('home-steps');
+      stepsEl.innerHTML = '';
+      const assaultStep = r.allCompleted ? null : r.studentLevel + 1;
+
+      (r.steps || []).forEach(function(stepInfo) {
+        const btn = document.createElement('button');
+        let cls = 'home-step-btn';
+        if (!stepInfo.available) {
+          btn.disabled = true;
+        } else if (stepInfo.step === assaultStep) {
+          cls += ' assault';
+        } else if (stepInfo.taken) {
+          cls += ' taken';
+        }
+        btn.className = cls;
+
+        const title = document.createElement('span');
+        title.className = 'home-step-title';
+        title.textContent = 'Ступень ' + stepInfo.step;
+        btn.appendChild(title);
+
+        const meta = document.createElement('span');
+        meta.className = 'home-step-meta';
+        if (!stepInfo.available) {
+          meta.textContent = 'Пока недоступна';
+        } else if (stepInfo.taken) {
+          meta.textContent = 'Повторение · нерешённых: ' + stepInfo.unsolvedCount + ' из ' + stepInfo.totalCount;
+        } else {
+          meta.textContent = 'Новая ступень · задач: ' + stepInfo.totalCount;
+        }
+        btn.appendChild(meta);
+
+        if (stepInfo.available) {
+          btn.onclick = function() { startStepSession(stepInfo.step); };
+        }
+        stepsEl.appendChild(btn);
+      });
+
+      switchScreen('screen-home');
+    }
+
+    function loadTrainerHome() {
+      if (!currentUser) return;
+      showLoader(true);
+      google.script.run
+        .withSuccessHandler(function(r) {
+          showLoader(false);
+          renderTrainerHome(r);
+        })
+        .withFailureHandler(handleScriptFailure)
+        .getTrainerHome(currentUser.id);
+    }
+
+    function startStepSession(step) {
+      if (!currentUser || sessionExpired) return;
+      playingStep = step;
+      showLoader(true);
+      resetTaskUi();
+      clearSessionState();
+      playingStep = step;
+
+      google.script.run
+        .withSuccessHandler(function(r) {
+          showLoader(false);
+          if (!r.success) return alert(r.message);
+
+          sessionTasks = r.sessionTasks || [];
+          queueIds = r.queueIds || sessionTasks.map(function(t) { return t.id.toString(); });
+          sessionLog = [];
+          runStats = r.currentRunStats;
+          playingStep = r.playingStep || step;
+          startSessionTimer();
+          document.getElementById('stat-level').innerText = 'Ступень: ' + playingStep;
+          switchScreen('screen-trainer');
+          showTaskFromSession(r.sessionIndex || 0, r.currentRunStats);
+        })
+        .withFailureHandler(handleScriptFailure)
+        .getTaskForUser(currentUser.id, step);
+    }
+
+    function loadNextTask() {
+      loadTrainerHome();
+    }
+
     function handleLogin() {
       showLoader(true);
       setAuthMsg('login-msg', '', true);
@@ -581,38 +731,10 @@
             switchScreen('screen-change-password');
             return;
           }
-          isFirstTaskAfterLogin = true;
-          switchScreen('screen-trainer');
-          loadNextTask();
+          loadTrainerHome();
         })
         .withFailureHandler(handleScriptFailure)
         .loginUser(document.getElementById('login-input').value, document.getElementById('password-input').value);
-    }
-
-    function loadNextTask() {
-      const startNewSession = isFirstTaskAfterLogin || needsNewSession;
-      isFirstTaskAfterLogin = false;
-      needsNewSession = false;
-
-      showLoader(true);
-      resetTaskUi();
-
-      google.script.run
-        .withSuccessHandler(r => {
-          showLoader(false);
-          if(!r.success) return alert(r.message);
-          if(r.allCompleted) return switchScreen('screen-result'), document.getElementById('result-title').innerText="Победа!", document.getElementById('result-text').innerText="Все уровни пройдены!";
-
-          sessionTasks = r.sessionTasks || [];
-          queueIds = r.queueIds || sessionTasks.map(function(t) { return t.id.toString(); });
-          sessionLog = [];
-          runStats = r.currentRunStats;
-          startSessionTimer();
-          document.getElementById('stat-level').innerText = "Ступень: " + (r.currentRunStats.studentLevel + 1);
-          showTaskFromSession(r.sessionIndex || 0, r.currentRunStats);
-        })
-        .withFailureHandler(handleScriptFailure)
-        .getTaskForUser(currentUser.id, startNewSession);
     }
 
     function handleSendAnswer() {
@@ -635,15 +757,23 @@
       const correctInSession = (runStats.correctInSession || 0) + (check.isCorrect ? 1 : 0);
       const errors = (runStats.errors || 0) + (check.isCorrect ? 0 : 1);
       const level = runStats.studentLevel;
+      const assaultStep = level + 1;
+      const step = playingStep || runStats.playingStep || assaultStep;
 
       let runStatus = 'continue';
       if (errors >= 3) {
         runStatus = 'fail';
       } else if (correctInSession >= 7) {
-        runStatus = (level + 1 >= 5) ? 'all_clear' : 'win';
+        if (step < assaultStep) {
+          runStatus = 'practice_win';
+        } else if (step >= 5 && level >= 4) {
+          runStatus = 'all_clear';
+        } else {
+          runStatus = 'win';
+        }
       }
 
-      runStats = buildLocalRunStats(level, sessionLog.length, correctInSession, errors);
+      runStats = buildLocalRunStats(level, sessionLog.length, correctInSession, errors, step);
       renderSessionStats(runStats);
 
       lastResponse = {
@@ -690,7 +820,8 @@
           currentUser.rowNum,
           pendingFinalize.queueIds,
           pendingFinalize.pairs,
-          pendingFinalize.runStatus
+          pendingFinalize.runStatus,
+          playingStep
         );
     }
 
@@ -709,6 +840,10 @@
         switchScreen('screen-result');
         document.getElementById('result-title').innerText = 'Ура!';
         document.getElementById('result-text').innerText = 'Ступень пройдена!';
+      } else if (status === 'practice_win') {
+        switchScreen('screen-result');
+        document.getElementById('result-title').innerText = 'Отлично!';
+        document.getElementById('result-text').innerText = 'Тренировка завершена.';
       } else if (status === 'fail') {
         switchScreen('screen-result');
         document.getElementById('result-title').innerText = 'Упс!';
